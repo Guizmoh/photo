@@ -1,27 +1,33 @@
-"""Mesure du bruit reellement present dans l'image, echelle par echelle.
+"""Mesure du bruit reellement present dans l'image, niveau par niveau.
 
-Pourquoi ne pas se contenter d'un ecart-type global : le bruit d'un capteur est
-*dependant du signal* (var = a*I + b : photons + electronique), et le
-dematricage le rend *correle spatialement*, donc son niveau ne decroit pas
-comme celui d'un bruit blanc quand on monte d'echelle. Un seuil unique
-sur-lisse les ombres ou laisse du bruit dans les hautes lumieres.
+Pourquoi ne pas se contenter d'un ecart-type global : le bruit d'un capteur
+depend du signal (``var = a*I + b`` : photons + electronique) et le
+dematricage le rend correle spatialement, donc son niveau ne decroit pas comme
+celui d'un bruit blanc quand on monte d'echelle. Un seuil unique sur-lisse les
+ombres ou laisse du bruit dans les hautes lumieres.
 
-Le moteur mesure donc, pour chaque plan de details starlet et chaque canal, une
-droite ``var_j(I) = a_j * I + b_j`` ou ``I`` est la luminosite locale. La mesure
-se fait sur le percentile bas des blocs de l'image (les blocs les plus plats),
-ce qui separe le bruit de la texture.
+naturaw mesure donc, pour chaque canal et chaque niveau de la pyramide, une
+droite ``var_j(I) = a_j * I + b_j`` ou ``I`` est la luminosite locale. La
+mesure se fait sur le percentile bas des blocs (les plus plats de l'image), ce
+qui separe le bruit de la texture.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 import numpy as np
 
-from .filters import STARLET_SIGMA, box, starlet_smooth
+from .pyramid import analyse, gaussian_stack, match_size
 
 _MAD_TO_SIGMA = 1.4826
+# Le bruit decroit d'au moins ce facteur (en variance) d'un niveau au suivant :
+# mesure sur bruit blanc comme sur bruit correle, le rapport reel vaut ~0,25.
+# Le plafond empeche une texture fine omnipresente de gonfler l'estimation aux
+# niveaux grossiers, ce qui reviendrait a effacer le detail utile.
+_DECAY_CAP = 0.45
+_MAX_BLOCKS = 4000
 
 
 @dataclass
@@ -42,7 +48,7 @@ class ScaleNoise:
 
 @dataclass
 class NoiseProfile:
-    """Profil de bruit complet d'une image (un modele par canal et par echelle)."""
+    """Profil de bruit complet d'une image (un modele par canal et par niveau)."""
 
     channels: List[List[ScaleNoise]] = field(default_factory=list)
     labels: Sequence[str] = ("Y", "Co", "Cg")
@@ -50,10 +56,8 @@ class NoiseProfile:
     def sigma_report(self, brightness: float = 0.18) -> str:
         parts = []
         for name, scales in zip(self.labels, self.channels):
-            if not scales:
-                continue
-            s = scales[0].sigma_at(brightness) * 100.0
-            parts.append(f"{name}={s:.2f}%")
+            if scales:
+                parts.append(f"{name}={scales[0].sigma_at(brightness) * 100:.2f}%")
         return "  ".join(parts)
 
     def luma_sigma(self, brightness: float = 0.18) -> float:
@@ -63,16 +67,23 @@ class NoiseProfile:
 
 
 def _block_stats(detail: np.ndarray, brightness: np.ndarray, block: int):
-    """Renvoie (sigma_bloc, luminosite_bloc) pour une grille de blocs."""
+    """(sigma, luminosite) par bloc, sur une grille eventuellement echantillonnee."""
     h, w = detail.shape[:2]
     nby, nbx = h // block, w // block
     if nby < 2 or nbx < 2:
         return None, None
+    # on ne regarde qu'un sous-ensemble de blocs quand l'image est grande :
+    # quelques milliers suffisent pour une statistique, et cela evite de
+    # mediane-r des dizaines de millions de pixels
+    step = max(1, int(np.ceil(np.sqrt(nby * nbx / _MAX_BLOCKS))))
     d = detail[: nby * block, : nbx * block].reshape(nby, block, nbx, block)
-    d = np.abs(d).transpose(0, 2, 1, 3).reshape(nby * nbx, block * block)
+    d = d[::step, :, ::step, :]
+    b = brightness[: nby * block, : nbx * block].reshape(nby, block, nbx, block)
+    b = b[::step, :, ::step, :]
+    n = d.shape[0] * d.shape[2]
+    d = np.abs(d.transpose(0, 2, 1, 3).reshape(n, block * block))
     sigma = _MAD_TO_SIGMA * np.median(d, axis=1)
-    bmap = brightness[: nby * block, : nbx * block].reshape(nby, block, nbx, block)
-    bmean = bmap.mean(axis=(1, 3)).reshape(-1)
+    bmean = b.mean(axis=(1, 3)).reshape(-1)
     return sigma.astype(np.float32), bmean.astype(np.float32)
 
 
@@ -91,107 +102,116 @@ def _fit_line(x: np.ndarray, y: np.ndarray, weights: np.ndarray):
     sxy = float((weights * (x - mx) * (y - my)).sum())
     a = sxy / sxx if sxx > 1e-12 else 0.0
     b = my - a * mx
-    if a < 0.0:  # pente negative impossible physiquement -> modele constant
+    if a < 0.0:                      # pente negative : impossible physiquement
         return 0.0, max(my, 0.0)
-    if b < 0.0:  # ordonnee negative -> on force b = 0 et on refait la pente
+    if b < 0.0:                      # ordonnee negative : on refait a b = 0
         denom = float((weights * x * x).sum())
         a = float((weights * x * y).sum() / denom) if denom > 1e-12 else 0.0
         return max(a, 0.0), 0.0
     return a, b
 
 
-def estimate_scale_noise(
-    channel: np.ndarray,
-    brightness: np.ndarray,
-    levels: int,
-    block: int = 24,
-    bins: int = 16,
-    percentile: float = 12.0,
-    min_blocks: int = 6,
-    decay_cap: float = 0.6,
-) -> List[ScaleNoise]:
-    """Mesure ``var_j(I)`` pour chaque plan de details d'un canal.
-
-    ``brightness`` est une version lissee de la luminance (variable explicative
-    commune a tous les canaux : le bruit depend du nombre de photons, pas de la
-    valeur du canal chroma lui-meme).
-
-    Deux garde-fous evitent de confondre texture et bruit :
-      * la taille des blocs grandit avec l'echelle (les coefficients y sont
-        correles sur de plus grandes distances) ;
-      * le bruit mesure doit decroitre d'une echelle a la suivante
-        (``decay_cap``). Une texture fine presente partout ferait sinon gonfler
-        l'estimation aux echelles grossieres, et donc lisser le detail utile.
-    """
+def estimate_level_noise(details: Sequence[np.ndarray],
+                         brightness_stack: Sequence[np.ndarray],
+                         block: int = 20, bins: int = 16,
+                         percentile: float = 12.0, min_blocks: int = 6,
+                         measure_levels: int = 4) -> List[ScaleNoise]:
+    """Mesure ``var_j(I)`` pour chaque plan de details d'un canal."""
     models: List[ScaleNoise] = []
-    cur = channel.astype(np.float32, copy=False)
-    bmax = float(np.percentile(brightness, 99.5)) if brightness.size else 1.0
-    bmax = max(bmax, 1e-3)
-    for j in range(levels):
-        nxt = starlet_smooth(cur, j)
-        detail = cur - nxt
-        block_j = int(min(96, block * (1 << j)))
-        sigma, bmean = _block_stats(detail, brightness, block_j)
-        if sigma is None and block_j > block:
-            sigma, bmean = _block_stats(detail, brightness, block)
+    n_meas = max(1, min(int(measure_levels), len(details)))
+    for j, detail in enumerate(details):
+        if j >= n_meas:
+            break
+        bright = match_size(brightness_stack[min(j, len(brightness_stack) - 1)],
+                            detail.shape)
+        bmax = max(float(np.percentile(bright, 99.5)), 1e-3)
+        sigma, bmean = _block_stats(detail, bright, block)
         if sigma is None:
-            # image trop petite : repli sur un MAD global
             s = _MAD_TO_SIGMA * float(np.median(np.abs(detail)))
             models.append(ScaleNoise(0.0, s * s, measured=False))
-            cur = nxt
-            continue
-        edges = np.linspace(0.0, bmax, bins + 1)
-        idx = np.clip(np.digitize(bmean, edges) - 1, 0, bins - 1)
-        xs, ys, ws = [], [], []
-        for k in range(bins):
-            sel = sigma[idx == k]
-            if sel.size < min_blocks:
-                continue
-            var = float(np.percentile(sel, percentile) ** 2)
-            xs.append(0.5 * (edges[k] + edges[k + 1]))
-            ys.append(var)
-            ws.append(np.sqrt(float(sel.size)))
-        if xs:
-            a, b = _fit_line(np.asarray(xs, np.float64), np.asarray(ys, np.float64),
-                             np.asarray(ws, np.float64))
-            models.append(ScaleNoise(a, b, measured=True))
         else:
-            var = float(np.percentile(sigma, percentile) ** 2)
-            models.append(ScaleNoise(0.0, var, measured=False))
-        if len(models) >= 2 and decay_cap > 0:
+            edges = np.linspace(0.0, bmax, bins + 1)
+            idx = np.clip(np.digitize(bmean, edges) - 1, 0, bins - 1)
+            xs, ys, ws = [], [], []
+            for k in range(bins):
+                sel = sigma[idx == k]
+                if sel.size < min_blocks:
+                    continue
+                xs.append(0.5 * (edges[k] + edges[k + 1]))
+                ys.append(float(np.percentile(sel, percentile) ** 2))
+                ws.append(np.sqrt(float(sel.size)))
+            if xs:
+                a, b = _fit_line(np.asarray(xs, np.float64), np.asarray(ys, np.float64),
+                                 np.asarray(ws, np.float64))
+                models.append(ScaleNoise(a, b, measured=True))
+            else:
+                var = float(np.percentile(sigma, percentile) ** 2)
+                models.append(ScaleNoise(0.0, var, measured=False))
+        if len(models) >= 2:
             prev, last = models[-2], models[-1]
-            last.a = min(last.a, prev.a * decay_cap)
-            last.b = min(last.b, prev.b * decay_cap)
-        cur = nxt
-    return models
+            last.a = min(last.a, prev.a * _DECAY_CAP)
+            last.b = min(last.b, prev.b * _DECAY_CAP)
+    return extend_models(models, len(details))
 
 
 def extend_models(models: List[ScaleNoise], levels: int) -> List[ScaleNoise]:
-    """Complete / prolonge la liste de modeles jusqu'a ``levels`` echelles.
-
-    Au-dela des echelles mesurees on extrapole avec la decroissance theorique
-    du starlet, en se calant sur la derniere echelle mesuree.
-    """
+    """Prolonge la liste jusqu'a ``levels`` niveaux (decroissance mesuree)."""
     out = list(models[:levels])
     if not out:
         return [ScaleNoise(0.0, 0.0, measured=False) for _ in range(levels)]
     while len(out) < levels:
-        j = len(out)
         ref = out[-1]
-        ratio = (STARLET_SIGMA[min(j, len(STARLET_SIGMA) - 1)] /
-                 STARLET_SIGMA[min(j - 1, len(STARLET_SIGMA) - 1)]) ** 2
-        out.append(ScaleNoise(ref.a * ratio, ref.b * ratio, measured=False))
+        out.append(ScaleNoise(ref.a * 0.25, ref.b * 0.25, measured=False))
     return out
 
 
+def quick_sigma(rgb: np.ndarray, max_pixels: int = 2_000_000) -> float:
+    """Estimation rapide et robuste de l'ecart-type du bruit (sous-echantillonnee).
+
+    Sert avant la mesure complete, quand une etape a besoin d'un ordre de
+    grandeur (detection des pixels chauds, par exemple).
+    """
+    import cv2
+    arr = np.asarray(rgb, dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[..., min(1, arr.shape[2] - 1)]
+    step = max(1, int(np.sqrt(arr.size / max(max_pixels, 1))))
+    small = np.ascontiguousarray(arr[::step, ::step])
+    if min(small.shape) < 8:
+        small = arr
+    # laplacien normalise : insensible aux rampes, sensible au bruit
+    hp = cv2.filter2D(small, -1, np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]],
+                                          np.float32) / 6.0)
+    return float(_MAD_TO_SIGMA * np.median(np.abs(hp)))
+
+
+def estimate_scale_noise(channel: np.ndarray, brightness: np.ndarray, levels: int,
+                         **kwargs) -> List[ScaleNoise]:
+    """Mesure le bruit d'un canal isole (construit sa propre pyramide)."""
+    details, _res = analyse(channel, levels)
+    stack = gaussian_stack(brightness, levels)
+    return estimate_level_noise(details, stack, measure_levels=kwargs.pop("measure_levels", levels),
+                                **kwargs)
+
+
 def measure_profile(ycocg: np.ndarray, levels: int, measure_levels: int = 4,
-                    block: int = 24) -> NoiseProfile:
-    """Profil de bruit des trois canaux YCoCg d'une image lineaire."""
-    brightness = box(ycocg[..., 0], 3)
-    np.clip(brightness, 0.0, None, out=brightness)
-    n_meas = max(1, min(int(measure_levels), int(levels)))
+                    block: int = 20,
+                    details: Optional[Sequence[Sequence[np.ndarray]]] = None,
+                    brightness_stack: Optional[Sequence[np.ndarray]] = None) -> NoiseProfile:
+    """Profil de bruit des trois canaux YCoCg d'une image lineaire.
+
+    ``details`` et ``brightness_stack`` permettent de reutiliser une
+    decomposition deja calculee (le debruiteur le fait : la pyramide n'est
+    construite qu'une fois par canal).
+    """
+    if brightness_stack is None:
+        brightness_stack = gaussian_stack(np.clip(ycocg[..., 0], 0.0, None), levels)
     channels = []
     for c in range(3):
-        models = estimate_scale_noise(ycocg[..., c], brightness, n_meas, block=block)
-        channels.append(extend_models(models, levels))
+        if details is not None:
+            chan_details = details[c]
+        else:
+            chan_details, _res = analyse(ycocg[..., c], levels)
+        channels.append(estimate_level_noise(chan_details, brightness_stack, block=block,
+                                             measure_levels=measure_levels))
     return NoiseProfile(channels=channels)

@@ -55,25 +55,41 @@ def test_output_is_cleaner_than_the_raw_development(degraded, tmp_path):
     assert grain(done) < grain(raw) * 0.6
 
 
-def test_process_array_respects_disabled_steps():
-    img = np.clip(synth.architecture(240, 360), 0.01, 1)
+def _all_off() -> Settings:
     s = Settings()
     s.denoise.strength = 0.0
     s.deblur.mode = "off"
     s.deskew.enabled = False
+    s.sharpen.amount = 0.0
+    s.tone.auto = False
+    s.rescue.impulse = "off"
     s.exposure = "non"
+    return s
+
+
+def test_process_array_respects_disabled_steps():
+    img = np.clip(synth.architecture(240, 360), 0.01, 1)
     report = {}
-    out = process_array(img.copy(), s, report=report)
+    out = process_array(img.copy(), _all_off(), report=report)
     assert np.allclose(out, img, atol=1e-6)
     assert report["debruitage"] == "desactive"
 
 
+def test_default_settings_do_act_on_a_degraded_image():
+    """Les reglages par defaut doivent reellement agir, pas se defiler."""
+    clean = np.clip(synth.architecture(300, 450), 0.01, 1)
+    noisy = synth.add_photon_noise(clean, 2.0e-3, 1.0e-4, seed=3)
+    report = {}
+    out = process_array(noisy.copy(), Settings(), report=report)
+    assert not np.allclose(out, noisy, atol=1e-4)
+    assert report["noise_luma_sigma"] > 0.001
+    assert "nettete" in report
+
+
 def test_exposure_modes():
     img = np.full((64, 64, 3), 0.1, np.float32)
-    s = Settings(exposure="1.0")
-    s.denoise.strength = 0.0
-    s.deblur.mode = "off"
-    s.deskew.enabled = False
+    s = _all_off()
+    s.exposure = "1.0"
     out = process_array(img.copy(), s, report={})
     assert abs(float(out.mean()) - 0.2) < 1e-4
 

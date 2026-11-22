@@ -1,17 +1,24 @@
 # naturaw
 
-Débruitage **naturel** de fichiers RAW, déflou de bougé et redressement
-automatique des photos penchées — en ligne de commande ou avec une petite
-interface graphique locale.
+Récupération de fichiers RAW abîmés : débruitage **naturel**, pixels chauds,
+netteté de capture, ouverture des ombres, déflou de bougé et redressement des
+photos penchées — en ligne de commande ou avec une petite interface graphique
+locale.
 
 Le mot d'ordre est *naturel* : une photo traitée ne doit pas se voir. Pas de
 rendu lissé « plastique », pas de contours cernés, pas de couleurs qui bavent.
 Chaque étape mesure ce qu'elle a devant elle et refuse d'agir quand elle n'est
 pas sûre, plutôt que d'abîmer l'image.
 
+Sur une photo sous-exposée de 2,5 diaphragmes, prise à très haut ISO et avec
+des pixels chauds, la chaîne complète fait passer la ressemblance à la scène
+réelle (SSIM) de **0,39 à 0,90**, en **0,55 s** pour 1,8 Mpx. Une photo de
+24 Mpx est traitée en **5,5 s** sur quatre cœurs (3,6 s en mode rapide).
+
 ```
 naturaw photo.CR2                    # une photo
 naturaw dossier/ -o sorties/ -j 4    # tout un dossier, 4 en parallèle
+naturaw photo.CR2 --rapide           # priorité à la vitesse
 naturaw --interface                  # interface graphique dans le navigateur
 ```
 
@@ -51,41 +58,70 @@ Tout le traitement a lieu en **lumière linéaire**, juste après le dématriça
 et avant toute courbe de contraste : c'est le seul espace où le modèle de
 bruit du capteur et la déconvolution sont physiquement justes.
 
-### 1. Débruitage
+La chaîne enchaîne sept étapes, dans cet ordre imposé par la physique :
+pixels chauds → bandes → exposition → débruitage → déflou → netteté →
+ouverture des ombres → redressement. Chacune peut être coupée.
+
+### 1. Défauts du capteur
+
+**Pixels chauds et bruit impulsionnel** (poses longues, forts ISO, capteur
+chaud). Ce sont des points isolés que le débruiteur prend pour du détail et
+que la netteté transforme en petites étoiles. Un pixel n'est corrigé que s'il
+sort du *maximum et du minimum* de ses huit voisins, pas d'une moyenne : un
+détail fin, même très contrasté, est porté par plusieurs pixels et survit.
+Mesure : 2 160 pixels chauds corrigés, +21 dB sur l'image concernée, et une
+image saine ressort à 120 dB (c'est-à-dire inchangée). Un échantillonnage
+préalable évite la passe complète quand il n'y a rien à corriger.
+
+**Bandes de lecture** du capteur (rayures horizontales ou verticales) :
+mesurées ligne par ligne sur les seuls pixels plats, rétrécies par la
+corrélation entre les deux moitiés de chaque ligne. Désactivées par défaut
+(voir « Limites »).
+
+### 2. Débruitage
 
 Le bruit d'un capteur dépend du signal (`variance = a·I + b` : photons +
 électronique) et le dématriçage le rend corrélé dans l'espace. Un seuil unique
 sur toute l'image sur-lisse les ombres ou laisse du bruit dans les clairs.
-naturaw **mesure** donc le bruit réellement présent, canal par canal et
-échelle par échelle, sur les blocs les plus plats de l'image, puis applique à
-chaque échelle un **filtre de Wiener local** :
+naturaw **mesure** donc le bruit réellement présent, canal par canal et niveau
+par niveau, sur les blocs les plus plats de l'image, puis applique à chaque
+niveau un **filtre de Wiener local**, en **deux passes** :
 
 ```
-gain = max(0, (énergie_locale − variance_du_bruit) / énergie_locale)
+passe 1 :  gain = max(0, (E − var_bruit) / E)            E = énergie locale
+passe 2 :  gain = E_estimée / (E_estimée + var_bruit)    E_estimée = passe 1
 ```
 
-Quatre choix font le rendu naturel :
+La seconde passe est l'idée du second étage de BM3D : la première sait *où*
+est le signal, la seconde peut donc doser beaucoup plus finement. Gain mesuré
+à très haut ISO : SSIM 0,858 → 0,899, et des aplats deux fois plus propres,
+pour un coût négligeable.
+
+Cinq choix font le rendu naturel :
 
 * **Luminance et chrominance séparées** (YCoCg). Le bruit de couleur est le
   plus visible et le moins porteur d'information : il est traité une fois et
   demie plus fort. La luminance, elle, est à peine touchée — c'est elle qui
   porte la netteté perçue.
-* **Transformée « starlet » non décimée** (algorithme à trous, noyau
-  B3-spline) plutôt que des ondelettes classiques : isotrope, invariante par
-  translation, reconstruction par simple somme. Aucun artefact en damier,
-  aucun halo de contour.
+* **Pyramide laplacienne** (Burt-Adelson) : reconstruction *exacte* au bit
+  près, donc ce que le débruiteur ne touche pas ressort intact, et chaque
+  niveau travaille à sa propre résolution — cinq fois moins de calcul qu'une
+  décomposition pleine résolution, à qualité identique (mesuré).
 * **Protection des textures** : un masque de contraste local rapporté au bruit
   local réinjecte une partie des coefficients dans les feuillages, tissus,
   cheveux, gravier — là où un débruiteur classique « efface ».
-* **Grain conservé** : 16 % du grain fin de luminance est remis en place
-  (jamais sur la couleur). Une image parfaitement lisse se *voit* ; un grain
-  fin achromatique est ce qui rend le résultat crédible. Réglable de 0 à 0,4.
+* **Grain conservé, et dosé par le bruit mesuré** : 18 % du grain fin de
+  luminance est remis en place (jamais sur la couleur). Une image parfaitement
+  lisse se *voit* ; un grain fin achromatique est ce qui rend le résultat
+  crédible. Mais garder 18 % du bruit d'un 25600 ISO ne ferait que remettre du
+  bruit : la part conservée décroît automatiquement avec le bruit mesuré
+  (0,18 à bas ISO, 0,07 à σ = 5 %).
 
 Un dernier garde-fou borne l'écart de chaque canal à cinq écarts-types de
 bruit : un débruiteur multi-échelle peut sinon, au bord d'un aplat très
 saturé, reconstituer une couleur franche à partir d'une échelle grossière.
 
-### 2. Déflou de bougé
+### 3. Déflou de bougé
 
 Le bougé est modélisé par une convolution avec la trajectoire du capteur
 pendant la pose, inconnue : c'est un problème *aveugle*.
@@ -110,7 +146,36 @@ pendant la pose, inconnue : c'est un problème *aveugle*.
   est appliquée en *rapport de luminance*, ce qui laisse teinte et saturation
   exactement intactes (pas de frange colorée).
 
-### 3. Redressement
+### 4. Netteté de capture
+
+Un RAW est *toujours* un peu doux : filtre passe-bas devant le capteur,
+dématriçage, diffraction, et le débruitage lui-même. Contrairement au bougé,
+cette perte est faible, isotrope et prévisible : on peut la corriger sans
+rien deviner. naturaw déconvolue une petite gaussienne par **filtre inverse
+régularisé précalculé** — une seule convolution, 45 fois plus rapide que huit
+itérations de Richardson-Lucy et plus précise (47,2 dB contre 43,4 sur un cas
+de référence).
+
+La correction est pondérée par la structure locale : là où il ne reste que du
+bruit, rien n'est accentué. C'est ce qui la sépare d'un masque flou, qui
+remonte le bruit autant que le détail (mesure : 36,6 dB / SSIM 0,963 contre
+35,5 dB / 0,945).
+
+### 5. Ouverture des ombres
+
+C'est ce qui sauve vraiment une photo sous-exposée. Un gain global brûle le
+ciel ; une courbe en S écrase le contraste local. naturaw sépare la luminance
+en une **base** (l'éclairement perçu) et un **détail** (la matière), dans le
+domaine logarithmique où le contraste est multiplicatif, et ne modifie que la
+base. La base vient d'un filtre guidé, qui suit les contours : c'est ce qui
+évite le halo clair autour des objets sombres, défaut classique de ces outils
+(mesuré : variation de gain < 5 % le long d'un contour franc). Le gain est
+appliqué en rapport sur les trois canaux, donc à teinte constante.
+
+À −3 EV, la médiane passe de 0,025 à 0,131 sans qu'aucune haute lumière ne
+soit écrêtée.
+
+### 6. Redressement
 
 Les lignes dominantes d'une scène construite sont horizontales ou verticales.
 Les segments sont détectés (LSD, repli sur Hough), ramenés **modulo 90°** — une
@@ -129,35 +194,86 @@ interpolation géométrique en tout et pour tout.
 
 ## Résultats mesurés
 
-Sur scènes de synthèse avec bruit réaliste dépendant du signal (métriques
-calculées en sRGB, vérité terrain connue ; `pytest` rejoue ces mesures).
+Sur scènes de synthèse avec bruit réaliste dépendant du signal (métriques en
+sRGB, vérité terrain connue ; `pytest` rejoue ces mesures).
 
-**Débruitage** — scène d'architecture (ciel, façades, texture, aplats saturés) :
+**Sauvetage complet** — photo sous-exposée de 2,5 EV, bruit σ = 5,4 %, pixels
+chauds, douceur de capteur, penchée de 2° :
 
-| bruit (σ à 18 % de gris) | image bruitée | naturaw | référence `cv2` NLM |
+| | PSNR | SSIM |
+|---|---|---|
+| développement brut (gain global seul) | 21,6 dB | 0,394 |
+| **naturaw, réglages par défaut** | **29,4 dB** | **0,904** |
+
+Le rapport de traitement dit exactement ce qui a été fait : 2 160 pixels
+chauds corrigés, bruit mesuré à 5,36 %, grain ramené de 0,18 à 0,067,
+exposition +2,50 EV, bougé non détecté, netteté 0,60, redressement +2,00°
+(valeur réelle : 2,00°).
+
+**Débruitage seul** — scène d'architecture (ciel, façades, texture, aplats
+saturés) :
+
+| bruit (σ à 18 % de gris) | image brute | naturaw | référence `cv2` NLM |
 |---|---|---|---|
-| 0,96 % | 38,8 dB / SSIM 0,963 | **45,8 dB / 0,991** | 37,3 dB / 0,967 |
-| 2,06 % | 32,0 dB / SSIM 0,849 | **40,5 dB / 0,969** | 34,3 dB / 0,951 |
-| 3,46 % | 27,2 dB / SSIM 0,668 | **37,2 dB / 0,931** | 31,1 dB / 0,930 |
+| 0,96 % | 38,8 dB / 0,963 | **45,3 dB / 0,990** | 37,3 dB / 0,967 |
+| 2,06 % | 32,0 dB / 0,849 | **40,3 dB / 0,972** | 34,3 dB / 0,951 |
+| 3,46 % | 27,2 dB / 0,668 | **37,0 dB / 0,944** | 31,1 dB / 0,930 |
+| 5,9 %  | 22,2 dB / 0,420 | **34,6 dB / 0,922** | 28,6 dB / 0,907 |
 
-Sur une scène contenant une mire de résolution et une texture fine, naturaw
-conserve **92 à 108 % de l'énergie de détail** de l'image d'origine, contre
-10 à 21 % pour le débruiteur non-local de référence : c'est toute la
-différence entre une image propre et une image repassée.
+L'écart qui compte est ailleurs : sur une scène contenant une mire de
+résolution et une texture fine, naturaw conserve **92 à 100 % de l'énergie de
+détail** de l'image d'origine, contre 10 à 21 % pour le débruiteur non-local
+de référence. C'est la différence entre une image propre et une image
+repassée.
 
-**Déflou** (scène texturée, mode `auto`) : bougé rectiligne de 9 px, +1,7 dB et
-SSIM 0,843 → 0,887 ; bougé de main de 25 px, +2,0 dB et SSIM 0,696 → 0,793.
-Une image nette, un flou de mise au point ou une estimation instable sont
-laissés **strictement inchangés**.
+**Netteté de capture** — scène passée dans une douceur de capteur
+(gaussienne σ = 0,75) puis bruitée, après débruitage :
 
-**Redressement** : erreur inférieure à 0,05° entre 0,3° et 7,5° d'inclinaison
-sur la scène de test ; une scène sans structure n'est pas touchée.
+| bruit | débruitée | + netteté | masque flou classique |
+|---|---|---|---|
+| 0,9 % | 36,0 dB / 0,976 | **39,2 dB / 0,983** | — |
+| 2,1 % | 34,7 dB / 0,957 | **36,2 dB / 0,961** | 35,5 dB / 0,945 |
+| 3,5 % | 33,5 dB / 0,930 | **34,1 dB / 0,932** | — |
 
-**Vitesse** (4 cœurs) : ≈ 0,5 s/Mpx pour le débruitage, ≈ 1 s de plus si le
-déflou s'applique. Environ 15 s pour un fichier 24 Mpx, mémoire ≈ 8 fois la
-taille de l'image en float32.
+**Déflou de bougé** (scène texturée, mode `auto`) : bougé rectiligne de 9 px,
++1,7 dB et SSIM 0,843 → 0,887 ; bougé de main de 25 px, +2,0 dB et SSIM
+0,696 → 0,793. Une image nette, un flou de mise au point ou une estimation
+instable sont laissés **strictement inchangés**.
 
----
+**Redressement** : erreur inférieure à 0,05° entre 0,3° et 7,5° d'inclinaison ;
+une scène sans structure n'est pas touchée.
+
+### Vitesse
+
+Quatre cœurs, chaîne complète, du RAW décodé au fichier écrit :
+
+| image | par défaut | `--rapide` |
+|---|---|---|
+| 6 Mpx | 2,6 s | 1,0 s |
+| 12 Mpx | 2,7 s | 1,8 s |
+| 24 Mpx | 5,5 s | 3,6 s |
+| 50 Mpx | 8,8 s | 8,8 s |
+
+Soit **0,23 s/Mpx** par défaut. Ce qui a été fait pour y arriver, chiffres à
+l'appui sur 24 Mpx :
+
+* pyramide laplacienne décimée au lieu d'une décomposition pleine résolution
+  à chaque échelle : **×5** sur la décomposition ;
+* cartes de gain et de structure calculées en demi-résolution (elles sont
+  lisses par construction) : débruitage 6,7 s → 3,8 s ;
+* les trois canaux traités de front (OpenCV et numpy relâchent le GIL) :
+  1,17 s → 0,53 s ;
+* conversions couleur par `cv2.transform` plutôt que canal par canal :
+  0,88 s → 0,15 s ;
+* mesure du bruit sur un échantillon de blocs : 4,7 s → 0,6 s ;
+* filtre inverse précalculé au lieu de Richardson-Lucy pour la netteté :
+  **×45** ;
+* pré-tests avant les étapes coûteuses : les pixels chauds ne sont cherchés
+  partout que si un échantillon en contient (1,4 s → 0,06 s), et l'analyse de
+  bougé s'arrête sur une seule imagette quand l'image est manifestement nette.
+
+Mémoire : environ huit fois la taille de l'image en float32 (≈ 2,5 Go pour un
+60 Mpx). `--cote-max` ou `--demi-taille` pour les machines justes.
 
 ## Limites, dites franchement
 
@@ -173,6 +289,16 @@ taille de l'image en float32.
   distinguent pas du plancher de l'estimateur.
 * La **mise au point ratée** n'est pas corrigée (flou isotrope) : c'est un
   autre problème, et le déconvoluer à l'aveugle abîme plus qu'il ne répare.
+* La **correction des bandes** est désactivée par défaut. Sur une scène dont
+  les structures sont parfaitement alignées sur la grille du capteur (façade,
+  mire), elle confond contenu et rayures ; sur du contenu ordinaire elle
+  gagne environ 2,4 dB. À activer quand on *voit* des rayures
+  (`--bandes h`, `v` ou `hv`).
+* La **netteté de capture** suppose un fichier venant d'un vrai capteur, donc
+  toujours un peu doux. Sur une image déjà parfaitement nette, elle
+  sur-accentue : `--nettete 0` la coupe.
+* L'**ouverture automatique des ombres** suit l'histogramme ; sur une photo
+  volontairement sombre (nocturne, clair-obscur), `--ombres non`.
 * Aucun **profil ICC** n'est incorporé aux fichiers écrits. La sortie par
   défaut est en sRGB ; les autres espaces (`--espace adobe|prophoto|raw`) sont
   pour qui gère sa couleur lui-même.
@@ -202,6 +328,9 @@ Le serveur n'écoute que sur la machine locale.
 
 ```bash
 naturaw photo.NEF -d fort --grain 0.25          # débruitage appuyé, grain argentique
+naturaw photo.CR3 -d sauvetage --ombres 0.8 --nettete 0.8   # photo « inexploitable »
+naturaw photo.NEF --rapide                      # deux fois plus rapide, pour trier
+naturaw photo.ARW --bandes h                    # rayures de lecture du capteur
 naturaw photo.ARW --apercu                      # contrôle rapide (demi-résolution, JPEG)
 naturaw photo.RAF --deflou-longueur 12 --deflou-angle 35
 naturaw photo.DNG --angle -1.4 --recadrage max  # redressement imposé
@@ -213,10 +342,16 @@ Principales options (`naturaw --help` pour la liste complète) :
 
 | option | rôle | défaut |
 |---|---|---|
-| `-d, --debruitage` | `off`, `leger`, `normal`, `fort`, `extreme` ou un nombre | `normal` |
+| `-d, --debruitage` | `off`, `leger`, `normal`, `fort`, `extreme`, `sauvetage` ou un nombre | `normal` |
 | `--grain` | part du grain fin conservée (0 à 0,4) | `0.16` |
 | `--detail` | protection des zones texturées | `0.45` |
 | `--chroma` | force relative sur la couleur | `1.5` |
+| `--nettete`, `--nettete-rayon` | netteté de capture (0 la coupe) | `0.6` / `0.8 px` |
+| `--ombres` | `auto`, `non`, ou 0 à 1 (1 ≈ +3 EV dans les noirs) | `auto` |
+| `--recup-hautes-lumieres`, `--contraste-local` | 0 à 1 | `0` |
+| `--pixels-chauds` | `auto` ou `off` | `auto` |
+| `--bandes` | `off`, `auto`, `h`, `v`, `hv` | `off` |
+| `--rapide` | une passe de débruitage, pas d'analyse de bougé | — |
 | `-b, --deflou` | `off`, `auto`, `on`, `force` | `auto` |
 | `--deflou-dose` | dose de déconvolution | `0.8` |
 | `--deflou-longueur`, `--deflou-angle` | bougé connu, imposé | — |
@@ -232,11 +367,14 @@ Principales options (`naturaw --help` pour la liste complète) :
 Chaque fichier traité affiche ce qui a été mesuré et décidé :
 
 ```
-[1/1] essai.dng  (1800x1200, 2.2 Mpx)
-   bruit mesure      : Y=1.54%  Co=0.66%  Cg=0.29%
-   exposition        : +0.16 EV
-   deflou            : ignore : estimation instable sur cette scene (...)
-   redressement      : redressee de +2.31 deg (confiance 0.99, 89 % conserve)
+[1/1] essai.dng  (1650x1100, 1.8 Mpx)
+   bruit mesure      : Y=5.36%  Co=5.96%  Cg=5.23%
+   pixels chauds     : 2160 pixels corriges (0.0397 %)
+   debruitage        : force 1.00, chroma x1.5, grain 0.18, 2 passes, 4 niveaux
+   exposition        : +2.50 EV
+   deflou            : ignore : image deja nette (etendue 1.3 px)
+   nettete           : dose 0.60, rayon 0.8 px
+   redressement      : redressee de +2.00 deg (confiance 0.97, 90 % conserve)
 ```
 
 ### Comme bibliothèque
@@ -258,8 +396,12 @@ propre = denoise_linear_rgb(image_lineaire, DenoiseParams())
 
 | fichier | rôle |
 |---|---|
-| `naturaw/noise.py` | mesure du bruit par canal et par échelle |
-| `naturaw/denoise.py` | Wiener local multi-échelle, grain, protection des textures |
+| `naturaw/pyramid.py` | pyramide laplacienne à reconstruction exacte |
+| `naturaw/noise.py` | mesure du bruit par canal et par niveau |
+| `naturaw/denoise.py` | Wiener local en deux passes, grain, protection des textures |
+| `naturaw/rescue.py` | pixels chauds, bandes de lecture |
+| `naturaw/sharpen.py` | netteté de capture (filtre inverse régularisé) |
+| `naturaw/tone.py` | ouverture des ombres sans halo |
 | `naturaw/deblur.py` | estimation aveugle du noyau, validation, Richardson-Lucy |
 | `naturaw/deskew.py` | détection de l'inclinaison, rotation, recadrage |
 | `naturaw/filters.py` | starlet, filtre guidé, bilatéral joint |
@@ -267,20 +409,21 @@ propre = denoise_linear_rgb(image_lineaire, DenoiseParams())
 | `naturaw/rawio.py` | lecture LibRaw, écriture TIFF/PNG/JPEG |
 | `naturaw/pipeline.py` | enchaînement complet et rapports |
 | `naturaw/cli.py`, `naturaw/webui.py` | ligne de commande, interface locale |
-| `tests/` | 70 tests, dont la fabrication de RAW de synthèse |
+| `tests/` | 98 tests, dont la fabrication de RAW de synthèse |
 
 ## Tests
 
 ```bash
 pip install -e ".[dev]"
-pytest -q            # 70 tests, environ 8 s
+pytest -q            # 98 tests, environ 9 s
 ```
 
 Les tests ne se contentent pas de vérifier que le code s'exécute : ils
 mesurent le gain de PSNR/SSIM, la texture conservée, le respect du garde-fou
-à 5 σ, la précision du redressement, l'adjonction correcte des opérateurs de
-convolution, et rejouent la chaîne complète sur un DNG Bayer fabriqué pour
-l'occasion.
+à 5 σ, la précision du redressement, la reconstruction exacte de la pyramide,
+l'adjonction correcte des opérateurs de convolution, l'absence de halo autour
+d'un contour franc, la survie d'un détail fin au filtre de pixels chauds, et
+rejouent la chaîne complète sur un DNG Bayer fabriqué pour l'occasion.
 
 ## Licence
 

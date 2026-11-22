@@ -129,12 +129,41 @@
           <option value="non">inchangée</option>
         </select></div>
     </div>
-    <label>Grain conservé <span class="val" id="gv">0.16</span></label>
-    <input type="range" id="grain" min="0" max="40" value="16">
-    <label>Protection des textures <span class="val" id="dv">0.35</span></label>
-    <input type="range" id="detail" min="0" max="100" value="35">
-    <label>Force sur la couleur <span class="val" id="cv">1.9</span></label>
-    <input type="range" id="chroma" min="0" max="40" value="19">
+    <label>Grain conservé <span class="val" id="gv">0.18</span></label>
+    <input type="range" id="grain" min="0" max="40" value="18">
+    <label>Protection des textures <span class="val" id="dv">0.45</span></label>
+    <input type="range" id="detail" min="0" max="100" value="45">
+    <label>Force sur la couleur <span class="val" id="cv">1.5</span></label>
+    <input type="range" id="chroma" min="0" max="40" value="15">
+    <label>Netteté de capture <span class="val" id="nv">0.60</span></label>
+    <input type="range" id="nettete" min="0" max="150" value="60">
+    <div class="grid2">
+      <div><label>Ombres</label>
+        <select id="ombres">
+          <option value="auto" selected>ouverture auto</option>
+          <option value="non">ne pas toucher</option>
+          <option value="0.3">légère (+1 EV)</option>
+          <option value="0.6">forte (+2 EV)</option>
+          <option value="1.0">sauvetage (+3 EV)</option>
+        </select></div>
+      <div><label>Contraste local <span class="val" id="lv">0.0</span></label>
+        <input type="range" id="contraste_local" min="0" max="100" value="0"></div>
+    </div>
+    <div class="grid2">
+      <div><label>Pixels chauds</label>
+        <select id="pixels_chauds">
+          <option value="1" selected>corriger</option>
+          <option value="0">laisser</option>
+        </select></div>
+      <div><label>Bandes du capteur</label>
+        <select id="bandes">
+          <option value="off" selected>ne pas toucher</option>
+          <option value="auto">auto</option>
+          <option value="h">horizontales</option>
+          <option value="v">verticales</option>
+          <option value="hv">les deux</option>
+        </select></div>
+    </div>
 
     <div class="grid2" style="margin-top:14px">
       <div><label>Déflou de bougé</label>
@@ -172,6 +201,9 @@
     </div>
     <label>Inclinaison maximale corrigée <span class="val" id="av">8</span>°</label>
     <input type="range" id="angle_max" min="1" max="20" value="8">
+    <label style="display:flex;gap:8px;align-items:center;margin-top:12px">
+      <input type="checkbox" id="rapide"> Mode rapide (une passe, sans analyse de bougé)
+    </label>
 
     <div class="row" style="margin-top:16px">
       <button class="ghost" id="preview">Aperçu avant/après</button>
@@ -237,6 +269,10 @@ function reglages(){
     debruitage: $("debruitage").value,
     grain: +$("grain").value/100, detail: +$("detail").value/100,
     chroma: +$("chroma").value/10,
+    nettete: +$("nettete").value/100,
+    ombres: $("ombres").value, contraste_local: +$("contraste_local").value/100,
+    pixels_chauds: $("pixels_chauds").value === "1", bandes: $("bandes").value,
+    rapide: $("rapide").checked,
     deflou: $("deflou").value, deflou_dose: +$("deflou_dose").value/100,
     deflou_longueur: +$("dlong").value, deflou_angle: +$("dang").value,
     redressement: $("redressement").value === "1",
@@ -297,10 +333,12 @@ async function poll(id){
   addEventListener("mouseup", ()=>drag=false); addEventListener("touchend", ()=>drag=false);
 })();
 
-["grain","detail","chroma","deflou_dose","angle_max","qualite"].forEach(id=>{
-  const out = {grain:"gv",detail:"dv",chroma:"cv",deflou_dose:"bv",angle_max:"av",qualite:"qv"}[id];
+["grain","detail","chroma","deflou_dose","angle_max","qualite","nettete","contraste_local"].forEach(id=>{
+  const out = {grain:"gv",detail:"dv",chroma:"cv",deflou_dose:"bv",angle_max:"av",
+               qualite:"qv",nettete:"nv",contraste_local:"lv"}[id];
   const fmt = v => id==="chroma" ? (v/10).toFixed(1)
-                 : id==="angle_max"||id==="qualite" ? v : (v/100).toFixed(2);
+                 : id==="angle_max"||id==="qualite" ? v
+                 : id==="contraste_local" ? (v/100).toFixed(1) : (v/100).toFixed(2);
   $(id).oninput = e => $(out).textContent = fmt(+e.target.value);
 });
 $("go").onclick = () => browse($("dir").value);

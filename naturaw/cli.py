@@ -13,6 +13,9 @@ from .deblur import DeblurParams
 from .denoise import PRESETS, DenoiseParams
 from .deskew import DeskewParams
 from .pipeline import Settings, collect_inputs, process_many, summarize
+from .rescue import RescueParams
+from .sharpen import SharpenParams
+from .tone import ToneParams
 
 EPILOGUE = """
 exemples
@@ -26,6 +29,16 @@ exemples
 
   naturaw photo.NEF -d fort --grain 0.25
       debruitage appuye mais grain conserve (rendu argentique).
+
+  naturaw photo.CR3 -d sauvetage --ombres 0.8 --nettete 0.8
+      photo tres sous-exposee et tres bruitee : on sort tout.
+
+  naturaw photo.NEF --rapide
+      une passe de debruitage, pas d'analyse de bouge : environ deux fois
+      plus rapide, pour trier un reportage.
+
+  naturaw photo.ARW --bandes h
+      rayures horizontales de lecture du capteur (pose longue, haut ISO).
 
   naturaw photo.ARW -b on
       force le deflou meme si le bouge detecte est faible.
@@ -87,6 +100,26 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--nettoyage-couleur", type=float, default=DenoiseParams.chroma_cleanup,
                    help="dose de nettoyage des plaques de couleur, 0-1 (defaut : %(default)s)")
 
+    g = p.add_argument_group("sauvetage (defauts du capteur)")
+    g.add_argument("--pixels-chauds", default="auto", choices=["auto", "off"],
+                   help="suppression des pixels chauds / morts (defaut : %(default)s)")
+    g.add_argument("--bandes", default="off", choices=["off", "auto", "h", "v", "hv"],
+                   help="correction des bandes de lecture du capteur ; a activer "
+                        "si vous voyez des rayures (defaut : %(default)s)")
+
+    g = p.add_argument_group("nettete et tonalite")
+    g.add_argument("--nettete", type=float, default=SharpenParams.amount, metavar="DOSE",
+                   help="nettete de capture, 0 a 1.5 (defaut : %(default)s)")
+    g.add_argument("--nettete-rayon", type=float, default=SharpenParams.radius,
+                   metavar="PX", help="douceur supposee du capteur (defaut : %(default)s)")
+    g.add_argument("--ombres", default="auto", metavar="DOSE",
+                   help="ouverture des ombres : auto, non, ou 0 a 1 "
+                        "(1 ~ +3 EV dans les noirs). Defaut : %(default)s")
+    g.add_argument("--recup-hautes-lumieres", type=float, default=0.0, metavar="DOSE",
+                   help="recuperation des hautes lumieres, 0 a 1")
+    g.add_argument("--contraste-local", type=float, default=0.0, metavar="DOSE",
+                   help="renforcement du contraste local, 0 a 1")
+
     g = p.add_argument_group("deflou de bouge")
     g.add_argument("-b", "--deflou", default="auto",
                    choices=["off", "auto", "on", "force"],
@@ -146,6 +179,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="nombre de fichiers traites en parallele (defaut : %(default)s)")
     g.add_argument("--apercu", action="store_true",
                    help="traitement rapide de controle (demi-taille, cote max 1800)")
+    g.add_argument("--rapide", action="store_true",
+                   help="priorite a la vitesse : une seule passe de debruitage "
+                        "et pas d'analyse de bouge (environ deux fois plus rapide)")
     g.add_argument("--rapport", metavar="FICHIER", default="",
                    help="ecrire un rapport JSON detaille")
     g.add_argument("--interface", nargs="?", const=8731, type=int, metavar="PORT",
@@ -182,6 +218,23 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         length=a.deflou_longueur,
         angle=a.deflou_angle,
     )
+    tone_shadows = 0.0
+    tone_auto = True
+    mode_ombres = str(a.ombres).lower()
+    if mode_ombres in ("non", "off", "none", "0"):
+        tone_auto = False
+    elif mode_ombres not in ("auto", "oui", "yes"):
+        try:
+            tone_shadows = float(mode_ombres)
+            tone_auto = False
+        except ValueError:
+            raise SystemExit(f"valeur invalide pour --ombres : {a.ombres!r} "
+                             "(attendu : auto, non, ou un nombre entre 0 et 1)")
+    tone = ToneParams(shadows=tone_shadows, auto=tone_auto,
+                      highlights=getattr(a, "recup_hautes_lumieres"),
+                      local_contrast=a.contraste_local)
+    rescue = RescueParams(impulse=getattr(a, "pixels_chauds"), banding=a.bandes)
+    sharpen = SharpenParams(amount=a.nettete, radius=a.nettete_rayon)
     deskew = DeskewParams(
         enabled=(a.redressement != "off") or a.angle is not None,
         max_angle=a.angle_max,
@@ -190,7 +243,8 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         angle=a.angle,
     )
     s = Settings(
-        denoise=denoise, deblur=deblur, deskew=deskew,
+        rescue=rescue, denoise=denoise, deblur=deblur, sharpen=sharpen,
+        tone=tone, deskew=deskew,
         demosaic=a.dematricage,
         camera_wb=(a.balance == "boitier"),
         color_space=a.espace,
@@ -201,6 +255,9 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         exposure=a.exposition, dither=a.dither,
         suffix=a.suffixe, overwrite=a.ecraser,
     )
+    if a.rapide:
+        s.denoise.refine = False
+        s.deblur.mode = "off"
     if a.apercu:
         s.half_size = True
         s.max_side = s.max_side or 1800

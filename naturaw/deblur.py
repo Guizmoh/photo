@@ -259,18 +259,29 @@ def prepare_crops(luma: np.ndarray, size: int = 640, count: int = 2):
     size -= size % 2
     if size < 96:
         return []
-    gx = cv2.Sobel(luma, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(luma, cv2.CV_32F, 0, 1, ksize=3)
+    # Le choix des zones n'a pas besoin de la pleine resolution : on le fait
+    # sur une version reduite (jusqu'a 16x moins de pixels a filtrer), ce qui
+    # rend cette etape negligeable meme sur un fichier de 50 Mpx.
+    scan_scale = 1.0
+    scan = luma
+    if max(h, w) > 1600:
+        scan_scale = 1600.0 / max(h, w)
+        scan = cv2.resize(luma, (max(64, int(round(w * scan_scale))),
+                                 max(64, int(round(h * scan_scale)))),
+                          interpolation=cv2.INTER_AREA)
+    gx = cv2.Sobel(scan, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(scan, cv2.CV_32F, 0, 1, ksize=3)
     grad = cv2.magnitude(gx, gy)
-    half = max(3, (size // 2) | 1)
+    half = max(3, (int(round(size * scan_scale)) // 2) | 1)
     energy = cv2.boxFilter(grad, -1, (half, half), normalize=True,
                            borderType=cv2.BORDER_REFLECT)
     jxx = cv2.boxFilter(gx * gx, -1, (half, half), normalize=True, borderType=cv2.BORDER_REFLECT)
     jyy = cv2.boxFilter(gy * gy, -1, (half, half), normalize=True, borderType=cv2.BORDER_REFLECT)
     jxy = cv2.boxFilter(gx * gy, -1, (half, half), normalize=True, borderType=cv2.BORDER_REFLECT)
-    trace = jxx + jyy
-    coherence = np.sqrt((jxx - jyy) ** 2 + 4.0 * jxy * jxy) / np.maximum(trace, 1e-9)
+    coherence = np.sqrt((jxx - jyy) ** 2 + 4.0 * jxy * jxy) / np.maximum(jxx + jyy, 1e-9)
     energy = energy * (1.0 - 0.7 * np.clip(coherence, 0.0, 1.0))
+    if scan_scale != 1.0:
+        energy = cv2.resize(energy, (w, h), interpolation=cv2.INTER_NEAREST)
     taken: List[Tuple[int, int]] = []
     crops = []
     work = energy.copy()
@@ -420,6 +431,20 @@ def analyze_blur(luma: np.ndarray, params: DeblurParams = DeblurParams(),
 
     textures = [t for _c, t in crops]
     patches = [c for c, _t in crops]
+
+    # Pre-test rapide : une seule imagette, un noyau plus petit et moins
+    # d'iterations. L'estimation sur une zone isolee a tendance a *sur*-estimer
+    # le flou ; si meme elle ne voit rien, l'image est nette et on s'arrete la.
+    # La plupart des photos passent par ce chemin, qui coute quatre fois moins.
+    if len(patches) > 1 and params.length <= 0.0:
+        quick = estimate_motion_kernel(patches[:1], kernel_size=min(ksize, 21),
+                                       iterations=4)
+        q_major, q_minor, q_aniso, q_angle = kernel_moments(quick)
+        if q_major < params.min_extent * 0.8:
+            est = BlurEstimate(quick, q_major, q_minor, q_aniso, q_angle)
+            est.reason = f"image deja nette (etendue {q_major:.1f} px)"
+            return est
+
     k = estimate_motion_kernel(patches, kernel_size=ksize)
     major, minor, aniso, angle = kernel_moments(k)
     est = BlurEstimate(k, major, minor, aniso, angle)

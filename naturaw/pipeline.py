@@ -26,6 +26,10 @@ import numpy as np
 from .deblur import DeblurParams, deblur_linear_rgb
 from .denoise import DenoiseParams, PRESETS, denoise_linear_rgb
 from .deskew import DeskewParams, deskew_image
+from .noise import quick_sigma
+from .rescue import RescueParams, apply_rescue
+from .sharpen import SharpenParams, sharpen_linear_rgb
+from .tone import ToneParams, tone_rescue
 from .rawio import (IMAGE_EXTENSIONS, RAW_EXTENSIONS, auto_exposure,
                     default_output_name, load_image, save_image)
 
@@ -36,8 +40,11 @@ ProgressFn = Callable[[str, float], None]
 class Settings:
     """Tous les reglages d'un traitement."""
 
+    rescue: RescueParams = field(default_factory=RescueParams)
     denoise: DenoiseParams = field(default_factory=DenoiseParams)
     deblur: DeblurParams = field(default_factory=DeblurParams)
+    sharpen: SharpenParams = field(default_factory=SharpenParams)
+    tone: ToneParams = field(default_factory=ToneParams)
     deskew: DeskewParams = field(default_factory=DeskewParams)
 
     # developpement
@@ -80,6 +87,15 @@ def process_array(rgb: np.ndarray, settings: Settings,
                          interpolation=cv2.INTER_AREA)
         report["reduction"] = f"ramenee a {rgb.shape[1]}x{rgb.shape[0]}"
 
+    # --- sauvetage : pixels chauds, bandes de lecture ---------------------
+    if progress:
+        progress("sauvetage", 0.12)
+    t0 = time.time()
+    sigma0 = quick_sigma(rgb)
+    report["bruit_rapide"] = round(sigma0, 5)
+    rgb = apply_rescue(rgb, settings.rescue, sigma0, report=report)
+    report["temps_sauvetage"] = round(time.time() - t0, 2)
+
     # --- exposition -------------------------------------------------------
     mode = str(settings.exposure or "auto").lower()
     if mode in ("auto", "oui", "yes"):
@@ -112,6 +128,25 @@ def process_array(rgb: np.ndarray, settings: Settings,
     t0 = time.time()
     rgb = deblur_linear_rgb(rgb, settings.deblur, noise_sigma=sigma, report=report)
     report["temps_deflou"] = round(time.time() - t0, 2)
+
+    # --- nettete de capture -----------------------------------------------
+    if progress:
+        progress("nettete", 0.68)
+    t0 = time.time()
+    sharpen = settings.sharpen
+    if str(report.get("deblur", "")).startswith("noyau"):
+        # une deconvolution vient d'avoir lieu : on n'en rajoute qu'un peu
+        sharpen = SharpenParams(**{**sharpen.__dict__,
+                                   "amount": sharpen.amount * 0.5})
+    rgb = sharpen_linear_rgb(rgb, sharpen, noise_sigma=sigma, report=report)
+    report["temps_nettete"] = round(time.time() - t0, 2)
+
+    # --- tonalite : ouverture des ombres ----------------------------------
+    if progress:
+        progress("tonalite", 0.72)
+    t0 = time.time()
+    rgb = tone_rescue(rgb, settings.tone, report=report)
+    report["temps_tonalite"] = round(time.time() - t0, 2)
 
     # --- redressement -----------------------------------------------------
     if progress:
@@ -242,12 +277,20 @@ def summarize(report: Dict[str, Any]) -> str:
              f"({report.get('dimensions', '?')}, {report.get('megapixels', '?')} Mpx)"]
     if report.get("noise_sigma"):
         lines.append(f"   bruit mesure      : {report['noise_sigma']}")
+    if report.get("pixels_chauds"):
+        lines.append(f"   pixels chauds     : {report['pixels_chauds']}")
+    if report.get("bandes") and report["bandes"] != "aucune bande detectee":
+        lines.append(f"   bandes            : {report['bandes']}")
     if report.get("debruitage"):
         lines.append(f"   debruitage        : {report['debruitage']}")
+    if report.get("tonalite") and report["tonalite"] != "inchangee":
+        lines.append(f"   tonalite          : {report['tonalite']}")
     if report.get("exposition"):
         lines.append(f"   exposition        : {report['exposition']}")
     if report.get("deblur"):
         lines.append(f"   deflou            : {report['deblur']}")
+    if report.get("nettete"):
+        lines.append(f"   nettete           : {report['nettete']}")
     if report.get("deskew"):
         lines.append(f"   redressement      : {report['deskew']}")
     lines.append(f"   sortie            : {report.get('sortie', '?')}"

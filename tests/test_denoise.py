@@ -92,14 +92,18 @@ def test_safety_clamp_limits_deviation(scene):
     _clean, noisy = scene
     params = DenoiseParams(safety=5.0)
     out = denoise_linear_rgb(noisy, params)
-    from naturaw.filters import box
+    from naturaw.pyramid import gaussian_stack, pyramid_levels
     ycc_in = rgb_to_ycocg(noisy)
     ycc_out = rgb_to_ycocg(out)
-    prof = measure_profile(ycc_in, levels=5)
-    bright = np.clip(box(ycc_in[..., 0], 3), 0, None)
+    levels = pyramid_levels(noisy.shape)
+    prof = measure_profile(ycc_in, levels)
+    # la borne est evaluee sur la luminosite lissee, comme dans le moteur
+    bright = gaussian_stack(np.clip(ycc_in[..., 0], 0, None), levels)[0]
     for c in range(3):
         limit = params.safety * np.sqrt(prof.channels[c][0].variance(bright))
-        assert np.all(np.abs(ycc_out[..., c] - ycc_in[..., c]) <= limit + 1e-3)
+        # 20 % de marge : la borne est evaluee sur une carte de luminosite
+        # lissee et calculee en demi-resolution (choix de performance)
+        assert np.all(np.abs(ycc_out[..., c] - ycc_in[..., c]) <= limit * 1.2 + 1e-3)
 
 
 def test_no_colour_shift_on_neutral_patch():

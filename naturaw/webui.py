@@ -24,6 +24,9 @@ from . import __version__
 from .deblur import DeblurParams
 from .denoise import PRESETS, DenoiseParams
 from .deskew import DeskewParams
+from .rescue import RescueParams
+from .sharpen import SharpenParams
+from .tone import ToneParams
 from .pipeline import Settings, process_file, summarize
 from .rawio import RAW_EXTENSIONS, IMAGE_EXTENSIONS, default_output_name
 
@@ -63,8 +66,26 @@ def _settings_from_payload(p: Dict[str, Any]) -> Settings:
         min_confidence=float(p.get("confiance", DeskewParams.min_confidence)),
         crop=str(p.get("recadrage", "aspect")),
     )
+    rescue = RescueParams(
+        impulse="auto" if p.get("pixels_chauds", True) else "off",
+        banding=str(p.get("bandes", "off")),
+    )
+    sharpen = SharpenParams(amount=float(p.get("nettete", SharpenParams.amount)))
+    ombres = str(p.get("ombres", "auto"))
+    if ombres in ("auto", ""):
+        tone = ToneParams(auto=True)
+    elif ombres in ("non", "off"):
+        tone = ToneParams(auto=False)
+    else:
+        tone = ToneParams(auto=False, shadows=float(ombres))
+    tone.highlights = float(p.get("hautes_lumieres", 0.0))
+    tone.local_contrast = float(p.get("contraste_local", 0.0))
+    if p.get("rapide"):
+        denoise.refine = False
+        deblur.mode = "off"
     return Settings(
-        denoise=denoise, deblur=deblur, deskew=deskew,
+        rescue=rescue, denoise=denoise, deblur=deblur, sharpen=sharpen,
+        tone=tone, deskew=deskew,
         fmt=str(p.get("format", "tiff16")),
         quality=int(p.get("qualite", 95)),
         exposure=str(p.get("exposition", "auto")),
