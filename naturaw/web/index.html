@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>naturaw</title>
+<style>
+  :root{
+    --bg:#f6f5f3; --panel:#ffffff; --ink:#1b1b1d; --muted:#6b6b72;
+    --line:#e2e0dc; --accent:#3c6e57; --accent-ink:#ffffff; --warn:#8a5a1b;
+    --radius:10px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#17181a; --panel:#1f2124; --ink:#ececee; --muted:#9a9aa2;
+           --line:#2e3135; --accent:#6ea98c; --accent-ink:#10231a; --warn:#d9a44d; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;
+         align-items:baseline;gap:12px;flex-wrap:wrap}
+  h1{font-size:19px;margin:0;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:13px}
+  main{display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,1.1fr);
+       gap:16px;padding:16px;align-items:start}
+  @media (max-width:880px){ main{grid-template-columns:1fr} }
+  section{background:var(--panel);border:1px solid var(--line);
+          border-radius:var(--radius);padding:14px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;
+     color:var(--muted);margin:0 0 10px}
+  label{display:block;font-size:13px;margin:10px 0 3px;color:var(--muted)}
+  input,select,button{font:inherit;color:var(--ink);background:var(--bg);
+       border:1px solid var(--line);border-radius:7px;padding:6px 8px;width:100%}
+  input[type=range]{padding:0;border:none;background:none;accent-color:var(--accent)}
+  input[type=checkbox]{accent-color:var(--accent)}
+  input[type=checkbox]{width:auto}
+  button{background:var(--accent);color:var(--accent-ink);border:none;
+         font-weight:600;cursor:pointer;padding:9px 12px}
+  button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500}
+  button:disabled{opacity:.55;cursor:default}
+  .row{display:flex;gap:8px;align-items:center}
+  .row>*{flex:1 1 0;min-width:0}
+  .row>button.fit{flex:0 0 auto;width:auto;padding:7px 14px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .list{max-height:240px;overflow:auto;border:1px solid var(--line);
+        border-radius:7px;margin-top:8px}
+  .item{display:flex;gap:8px;align-items:center;padding:5px 9px;
+        border-bottom:1px solid var(--line);font-size:14px}
+  .item:last-child{border-bottom:none}
+  .item:hover{background:var(--bg)}
+  .dir{cursor:pointer;color:var(--accent);font-weight:600}
+  .tag{font-size:11px;color:var(--muted);margin-left:auto;white-space:nowrap}
+  .val{float:right;color:var(--ink);font-variant-numeric:tabular-nums}
+  pre{background:var(--bg);border:1px solid var(--line);border-radius:7px;
+      padding:10px;font-size:12.5px;max-height:230px;overflow:auto;white-space:pre-wrap}
+  .bar{height:7px;background:var(--line);border-radius:99px;overflow:hidden;margin:10px 0}
+  .bar>div{height:100%;width:0;background:var(--accent);transition:width .25s}
+  .cmp{position:relative;overflow:hidden;border-radius:7px;border:1px solid var(--line);
+       margin-top:10px;background:var(--bg);touch-action:none}
+  .cmp img{display:block;width:100%}
+  .cmp .after{position:absolute;inset:0;clip-path:inset(0 0 0 50%)}
+  .cmp .handle{position:absolute;top:0;bottom:0;left:50%;width:2px;background:#fff;
+       box-shadow:0 0 0 1px rgba(0,0,0,.45);cursor:ew-resize}
+  .cmp .handle::after{content:"";position:absolute;top:50%;left:50%;width:26px;height:26px;
+       transform:translate(-50%,-50%);border-radius:50%;background:#fff;
+       box-shadow:0 1px 4px rgba(0,0,0,.5)}
+  .cmp .lab{position:absolute;bottom:6px;font-size:11px;background:rgba(0,0,0,.55);
+       color:#fff;padding:2px 6px;border-radius:4px}
+  .hint{font-size:12.5px;color:var(--muted);margin-top:8px}
+  .warn{color:var(--warn)}
+  details{margin-top:10px}
+  summary{cursor:pointer;font-size:13px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>naturaw</h1>
+  <span class="sub" id="ver">débruitage naturel · déflou de bougé · redressement</span>
+</header>
+
+<main>
+  <section>
+    <h2>Photos</h2>
+    <div class="row">
+      <input id="dir" placeholder="chemin du dossier" style="flex:4">
+      <button class="ghost fit" id="go">Ouvrir</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="ghost" id="up">⬆ Dossier parent</button>
+      <button class="ghost" id="all">Tout cocher</button>
+      <button class="ghost" id="none">Tout décocher</button>
+    </div>
+    <div class="list" id="dirs"></div>
+    <div class="list" id="files"></div>
+    <div class="hint" id="count">Aucun fichier.</div>
+
+    <h2 style="margin-top:16px">Sortie</h2>
+    <label>Dossier de sortie <span class="sub">(vide = à côté des originaux)</span></label>
+    <input id="out" placeholder="">
+    <div class="grid2">
+      <div><label>Format</label>
+        <select id="format">
+          <option value="tiff16">TIFF 16 bits</option>
+          <option value="jpeg">JPEG</option>
+          <option value="png16">PNG 16 bits</option>
+          <option value="png">PNG 8 bits</option>
+        </select></div>
+      <div><label>Qualité JPEG <span class="val" id="qv">95</span></label>
+        <input type="range" id="qualite" min="60" max="100" value="95"></div>
+    </div>
+    <label>Suffixe du fichier</label>
+    <input id="suffixe" value="_naturaw">
+  </section>
+
+  <section>
+    <h2>Réglages</h2>
+    <div class="grid2">
+      <div><label>Débruitage</label>
+        <select id="debruitage">
+          <option value="off">aucun</option>
+          <option value="leger">léger</option>
+          <option value="normal" selected>normal</option>
+          <option value="fort">fort</option>
+          <option value="extreme">extrême</option>
+        </select></div>
+      <div><label>Exposition</label>
+        <select id="exposition">
+          <option value="auto" selected>auto</option>
+          <option value="non">inchangée</option>
+        </select></div>
+    </div>
+    <label>Grain conservé <span class="val" id="gv">0.16</span></label>
+    <input type="range" id="grain" min="0" max="40" value="16">
+    <label>Protection des textures <span class="val" id="dv">0.35</span></label>
+    <input type="range" id="detail" min="0" max="100" value="35">
+    <label>Force sur la couleur <span class="val" id="cv">1.9</span></label>
+    <input type="range" id="chroma" min="0" max="40" value="19">
+
+    <div class="grid2" style="margin-top:14px">
+      <div><label>Déflou de bougé</label>
+        <select id="deflou">
+          <option value="off">aucun</option>
+          <option value="auto" selected>auto (si bougé franc)</option>
+          <option value="on">oui (tests assouplis)</option>
+          <option value="force">forcé (aucun test)</option>
+        </select></div>
+      <div><label>Dose <span class="val" id="bv">0.80</span></label>
+        <input type="range" id="deflou_dose" min="0" max="100" value="80"></div>
+    </div>
+    <details>
+      <summary>Bougé connu : imposer la trajectoire</summary>
+      <div class="grid2">
+        <div><label>Longueur (px)</label><input type="number" id="dlong" value="0" min="0" step="0.5"></div>
+        <div><label>Angle (°)</label><input type="number" id="dang" value="0" step="1"></div>
+      </div>
+      <div class="hint">C'est la voie la plus fiable quand on voit la direction
+        de la traînée : l'estimation aveugle reste approximative.</div>
+    </details>
+
+    <div class="grid2" style="margin-top:14px">
+      <div><label>Redressement</label>
+        <select id="redressement">
+          <option value="1" selected>automatique</option>
+          <option value="0">aucun</option>
+        </select></div>
+      <div><label>Recadrage</label>
+        <select id="recadrage">
+          <option value="aspect" selected>garder le format</option>
+          <option value="max">aire maximale</option>
+          <option value="none">aucun</option>
+        </select></div>
+    </div>
+    <label>Inclinaison maximale corrigée <span class="val" id="av">8</span>°</label>
+    <input type="range" id="angle_max" min="1" max="20" value="8">
+
+    <div class="row" style="margin-top:16px">
+      <button class="ghost" id="preview">Aperçu avant/après</button>
+      <button id="run">Traiter la sélection</button>
+    </div>
+    <div class="bar"><div id="prog"></div></div>
+    <div class="hint" id="status">Prêt.</div>
+    <div class="cmp" id="cmp" hidden>
+      <img id="imgA"><div class="after"><img id="imgB"></div>
+      <div class="handle" id="handle"></div>
+      <span class="lab" style="left:8px">avant</span>
+      <span class="lab" style="right:8px">après</span>
+    </div>
+    <pre id="log" hidden></pre>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let files = [], dirNow = "";
+
+const fmtSize = n => n > 1e6 ? (n/1048576).toFixed(1)+" Mo" : Math.round(n/1024)+" Ko";
+
+async function browse(dir){
+  const r = await fetch("/api/parcourir?dir="+encodeURIComponent(dir));
+  const d = await r.json();
+  if(d.erreur){ $("status").textContent = d.erreur; return; }
+  dirNow = d.dossier; $("dir").value = d.dossier;
+  $("dirs").innerHTML = d.dossiers.length ? "" : '<div class="item sub">aucun sous-dossier</div>';
+  d.dossiers.forEach(name => {
+    const el = document.createElement("div");
+    el.className = "item";
+    el.innerHTML = '<span class="dir">📁 '+name+'</span>';
+    el.querySelector(".dir").onclick = () => browse(d.dossier+"/"+name);
+    $("dirs").appendChild(el);
+  });
+  files = d.fichiers.map(f => ({...f, chemin: d.dossier+"/"+f.nom, coche: f.raw}));
+  renderFiles();
+}
+
+function renderFiles(){
+  const box = $("files"); box.innerHTML = "";
+  if(!files.length) box.innerHTML = '<div class="item sub">aucune photo reconnue ici</div>';
+  files.forEach((f,i) => {
+    const el = document.createElement("div");
+    el.className = "item";
+    el.innerHTML = '<input type="checkbox" '+(f.coche?"checked":"")+'>'+
+      '<span>'+f.nom+'</span><span class="tag">'+(f.raw?"RAW · ":"")+fmtSize(f.taille)+'</span>';
+    el.querySelector("input").onchange = e => { files[i].coche = e.target.checked; updateCount(); };
+    box.appendChild(el);
+  });
+  updateCount();
+}
+function updateCount(){
+  const n = files.filter(f=>f.coche).length;
+  $("count").textContent = n ? n+" photo(s) sélectionnée(s) sur "+files.length
+                             : (files.length+" photo(s), aucune sélectionnée");
+  $("run").disabled = n === 0; $("preview").disabled = n === 0;
+}
+
+function reglages(){
+  return {
+    debruitage: $("debruitage").value,
+    grain: +$("grain").value/100, detail: +$("detail").value/100,
+    chroma: +$("chroma").value/10,
+    deflou: $("deflou").value, deflou_dose: +$("deflou_dose").value/100,
+    deflou_longueur: +$("dlong").value, deflou_angle: +$("dang").value,
+    redressement: $("redressement").value === "1",
+    recadrage: $("recadrage").value, angle_max: +$("angle_max").value,
+    format: $("format").value, qualite: +$("qualite").value,
+    exposition: $("exposition").value, suffixe: $("suffixe").value
+  };
+}
+
+async function start(url){
+  const sel = files.filter(f=>f.coche).map(f=>f.chemin);
+  $("run").disabled = $("preview").disabled = true;
+  $("log").hidden = false; $("log").textContent = "";
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({fichiers: sel, sortie: $("out").value, reglages: reglages()})});
+  const d = await r.json();
+  if(d.erreur){ $("status").textContent = d.erreur; updateCount(); return; }
+  poll(d.id);
+}
+
+async function poll(id){
+  const r = await fetch("/api/tache?id="+id);
+  const j = await r.json();
+  $("prog").style.width = Math.round(j.avancement*100)+"%";
+  $("status").textContent = j.termine ? "Terminé." :
+      "Traitement : "+(j.courant||"…")+"  ("+j.rapports.length+"/"+j.total+")";
+  if(j.resume && j.resume.length) $("log").textContent = j.resume.join("\n");
+  else if(j.rapports.length) $("log").textContent = j.rapports.map(
+      x => Object.entries(x).filter(([k,v])=>typeof v!=="object")
+            .map(([k,v])=>k+" : "+v).join("\n")).join("\n\n");
+  if(j.apercus && j.apercus.length){
+    const a = j.apercus[0].fichiers;
+    if(a && a.avant && a.apres){
+      $("imgA").src = "/api/image?path="+encodeURIComponent(a.avant);
+      $("imgB").src = "/api/image?path="+encodeURIComponent(a.apres);
+      $("cmp").hidden = false;
+    }
+  }
+  if(!j.termine) setTimeout(()=>poll(id), 600);
+  else updateCount();
+}
+
+// curseur avant/après
+(function(){
+  const cmp = $("cmp"), handle = $("handle");
+  let drag = false;
+  const move = e => {
+    if(!drag) return;
+    const r = cmp.getBoundingClientRect();
+    const x = Math.min(Math.max((e.touches?e.touches[0].clientX:e.clientX)-r.left,0),r.width);
+    const p = x/r.width*100;
+    handle.style.left = p+"%";
+    cmp.querySelector(".after").style.clipPath = "inset(0 0 0 "+p+"%)";
+  };
+  handle.addEventListener("mousedown", ()=>drag=true);
+  handle.addEventListener("touchstart", ()=>drag=true);
+  addEventListener("mousemove", move); addEventListener("touchmove", move);
+  addEventListener("mouseup", ()=>drag=false); addEventListener("touchend", ()=>drag=false);
+})();
+
+["grain","detail","chroma","deflou_dose","angle_max","qualite"].forEach(id=>{
+  const out = {grain:"gv",detail:"dv",chroma:"cv",deflou_dose:"bv",angle_max:"av",qualite:"qv"}[id];
+  const fmt = v => id==="chroma" ? (v/10).toFixed(1)
+                 : id==="angle_max"||id==="qualite" ? v : (v/100).toFixed(2);
+  $(id).oninput = e => $(out).textContent = fmt(+e.target.value);
+});
+$("go").onclick = () => browse($("dir").value);
+$("dir").onkeydown = e => { if(e.key==="Enter") browse($("dir").value); };
+$("up").onclick = () => browse(dirNow+"/..");
+$("all").onclick = () => { files.forEach(f=>f.coche=true); renderFiles(); };
+$("none").onclick = () => { files.forEach(f=>f.coche=false); renderFiles(); };
+$("run").onclick = () => start("/api/traiter");
+$("preview").onclick = () => start("/api/apercu");
+
+fetch("/api/defauts").then(r=>r.json()).then(d=>{
+  $("ver").textContent = "v"+d.version+" · débruitage naturel · déflou de bougé · redressement";
+  browse(d.dossier);
+});
+</script>
+</body>
+</html>
