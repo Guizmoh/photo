@@ -78,14 +78,34 @@ mesurées ligne par ligne sur les seuls pixels plats, rétrécies par la
 corrélation entre les deux moitiés de chaque ligne. Désactivées par défaut
 (voir « Limites »).
 
+Une correction qui vaut d'être signalée : par défaut LibRaw abaisse le niveau
+de blanc jusqu'au pixel le plus clair du fichier. Deux photos de la même scène
+sortent alors avec des expositions différentes selon le bruit ou un reflet
+(mesuré : 0,279 contre 0,360 de luminance moyenne, soit 29 % d'écart).
+naturaw garde le niveau de blanc déclaré et décide lui-même de l'exposition.
+
 ### 2. Débruitage
 
 Le bruit d'un capteur dépend du signal (`variance = a·I + b` : photons +
 électronique) et le dématriçage le rend corrélé dans l'espace. Un seuil unique
 sur toute l'image sur-lisse les ombres ou laisse du bruit dans les clairs.
-naturaw **mesure** donc le bruit réellement présent, canal par canal et niveau
-par niveau, sur les blocs les plus plats de l'image, puis applique à chaque
-niveau un **filtre de Wiener local**, en **deux passes** :
+naturaw **mesure** donc le bruit réellement présent, canal par canal, sur les
+blocs les plus plats de l'image. Aux niveaux grossiers de la pyramide, la
+mesure n'est plus possible : sur une image riche en texture, *aucun* bloc n'y
+est vide de structure et l'estimation monte jusqu'à vingt fois trop haut — ce
+qui efface le détail. Le bruit y est donc **prédit** à partir du niveau fin,
+avec une loi de décroissance mesurée sur des captures simulées (×0,08 au
+premier passage, ×0,25 ensuite) remarquablement stable d'une scène et d'une
+sensibilité à l'autre ; la mesure ne sert plus que de garde-fou quand elle est
+*plus basse* que la prédiction. Ce seul changement a rendu 1 dB et 4 points de
+MTF de texture sur la mire dead leaves.
+
+Enfin, la force est **ramenée à zéro quand le bruit mesuré est négligeable** :
+à 200 ISO il n'y a rien à gagner et du détail à perdre, et la photo ressort
+bit pour bit identique.
+
+Le reste applique à chaque niveau un **filtre de Wiener local**, en
+**deux passes** :
 
 ```
 passe 1 :  gain = max(0, (E − var_bruit) / E)            E = énergie locale
@@ -194,8 +214,53 @@ interpolation géométrique en tout et pour tout.
 
 ## Résultats mesurés
 
-Sur scènes de synthèse avec bruit réaliste dépendant du signal (métriques en
-sRGB, vérité terrain connue ; `pytest` rejoue ces mesures).
+Les mesures sont faites sur des **captures simulées** : une scène de synthèse
+est échantillonnée par une matrice de Bayer, le bruit de photons et de lecture
+est ajouté *au niveau du photosite*, le résultat est écrit en DNG puis
+redéveloppé par LibRaw comme n'importe quel fichier d'appareil. Le bruit y est
+donc corrélé spatialement et coloré par le dématriçage (corrélation mesurée
+entre pixels voisins : 0,3 — un bruit blanc ajouté après coup donnerait 0,0 et
+serait beaucoup plus facile à enlever). La référence est la même scène
+développée sans bruit. `pytest` rejoue ces mesures.
+
+Deux scènes : une scène d'architecture (ciel, façades, aplats saturés) et une
+mire **« dead leaves »** — des disques empilés dont les rayons suivent une loi
+de puissance. C'est le modèle de référence des statistiques d'images
+naturelles et la mire que l'industrie photo utilise pour mesurer la
+conservation de la texture (spectre en 1/f², contours francs à toutes les
+échelles). C'est le cas difficile : aucune zone n'y est lisse.
+
+**Scène d'architecture** (PSNR / SSIM) :
+
+| sensibilité | fichier développé | naturaw | référence `cv2` NLM |
+|---|---|---|---|
+| 200 ISO | 48,6 dB / 0,992 | 48,6 dB / 0,992 *(laissée intacte)* | 41,3 dB / 0,981 |
+| 1600 ISO | 39,7 dB / 0,940 | **45,0 dB / 0,985** | 41,2 dB / 0,981 |
+| 6400 ISO | 33,2 dB / 0,786 | **40,2 dB / 0,963** | 38,1 dB / 0,969 |
+| 25600 ISO | 25,9 dB / 0,452 | **34,6 dB / 0,893** | 33,9 dB / 0,946 |
+| 102400 ISO | 17,8 dB / 0,148 | **28,4 dB / 0,740** | 26,6 dB / 0,869 |
+
+**Mire dead leaves** — le cas où la plupart des débruiteurs s'effondrent :
+
+| sensibilité | fichier développé | naturaw | référence `cv2` NLM |
+|---|---|---|---|
+| 200 ISO | 32,1 dB / 0,991 | 31,5 dB / 0,988 | 31,4 dB / 0,977 |
+| 1600 ISO | 31,0 dB / 0,974 | 30,4 dB / **0,981** | 30,6 dB / 0,971 |
+| 6400 ISO | 28,2 dB / 0,911 | **28,5 dB / 0,963** | 27,7 dB / 0,917 |
+| 25600 ISO | 21,8 dB / 0,731 | **24,4 dB / 0,900** | 21,3 dB / 0,714 |
+| 102400 ISO | 16,8 dB / 0,536 | **19,3 dB / 0,740** | 17,5 dB / 0,560 |
+
+**Conservation de la texture (MTF, méthode du spectre croisé)** : combien du
+*signal* d'origine subsiste à chaque finesse de détail. Le spectre croisé
+ignore le bruit résiduel, donc on ne peut pas tricher en gardant du bruit à la
+place de la texture. 1,00 = texture intacte.
+
+| | fin (0,35 cy/px) | moyen (0,20) | large (0,05) |
+|---|---|---|---|
+| naturaw, 6400 ISO | 0,94 | 0,95 | 0,98 |
+| naturaw, 25600 ISO | 0,87 | 0,90 | 0,95 |
+| naturaw, 102400 ISO | 0,62 | 0,68 | 0,81 |
+| NLM, 102400 ISO (architecture) | 0,21 | 0,28 | 0,83 |
 
 **Sauvetage complet** — photo sous-exposée de 2,5 EV, bruit σ = 5,4 %, pixels
 chauds, douceur de capteur, penchée de 2° :
@@ -210,35 +275,15 @@ chauds corrigés, bruit mesuré à 5,36 %, grain ramené de 0,18 à 0,067,
 exposition +2,50 EV, bougé non détecté, netteté 0,60, redressement +2,00°
 (valeur réelle : 2,00°).
 
-**Débruitage seul** — scène d'architecture (ciel, façades, texture, aplats
-saturés) :
-
-| bruit (σ à 18 % de gris) | image brute | naturaw | référence `cv2` NLM |
-|---|---|---|---|
-| 0,96 % | 38,8 dB / 0,963 | **45,3 dB / 0,990** | 37,3 dB / 0,967 |
-| 2,06 % | 32,0 dB / 0,849 | **40,3 dB / 0,972** | 34,3 dB / 0,951 |
-| 3,46 % | 27,2 dB / 0,668 | **37,0 dB / 0,944** | 31,1 dB / 0,930 |
-| 5,9 %  | 22,2 dB / 0,420 | **34,6 dB / 0,922** | 28,6 dB / 0,907 |
-
-L'écart qui compte est ailleurs : sur une scène contenant une mire de
-résolution et une texture fine, naturaw conserve **92 à 100 % de l'énergie de
-détail** de l'image d'origine, contre 10 à 21 % pour le débruiteur non-local
-de référence. C'est la différence entre une image propre et une image
-repassée.
-
 **Netteté de capture** — scène passée dans une douceur de capteur
-(gaussienne σ = 0,75) puis bruitée, après débruitage :
+(gaussienne σ = 0,75) puis bruitée, après débruitage : 36,0 → **39,2 dB** à
+bas bruit, 34,7 → **36,2 dB** à 2 % de bruit, contre 35,5 dB / SSIM 0,945 pour
+un masque flou classique.
 
-| bruit | débruitée | + netteté | masque flou classique |
-|---|---|---|---|
-| 0,9 % | 36,0 dB / 0,976 | **39,2 dB / 0,983** | — |
-| 2,1 % | 34,7 dB / 0,957 | **36,2 dB / 0,961** | 35,5 dB / 0,945 |
-| 3,5 % | 33,5 dB / 0,930 | **34,1 dB / 0,932** | — |
-
-**Déflou de bougé** (scène texturée, mode `auto`) : bougé rectiligne de 9 px,
-+1,7 dB et SSIM 0,843 → 0,887 ; bougé de main de 25 px, +2,0 dB et SSIM
-0,696 → 0,793. Une image nette, un flou de mise au point ou une estimation
-instable sont laissés **strictement inchangés**.
+**Déflou de bougé** (mode `auto`) : bougé rectiligne de 9 px, +1,7 dB et SSIM
+0,843 → 0,887 ; bougé de main de 25 px, +2,0 dB et SSIM 0,696 → 0,793. Une
+image nette, un flou de mise au point ou une estimation instable sont laissés
+**strictement inchangés**.
 
 **Redressement** : erreur inférieure à 0,05° entre 0,3° et 7,5° d'inclinaison ;
 une scène sans structure n'est pas touchée.
@@ -289,6 +334,10 @@ Mémoire : environ huit fois la taille de l'image en float32 (≈ 2,5 Go pour un
   distinguent pas du plancher de l'estimateur.
 * La **mise au point ratée** n'est pas corrigée (flou isotrope) : c'est un
   autre problème, et le déconvoluer à l'aveugle abîme plus qu'il ne répare.
+* La **mesure du bruit est calibrée pour des fichiers d'appareil** (12 Mpx et
+  plus). Sur une image fortement réduite et très texturée, elle surestime le
+  bruit (×1,7 mesuré sur une mire dead leaves de 0,5 Mpx) et le débruitage
+  devient trop appuyé ; `-d leger` compense.
 * La **correction des bandes** est désactivée par défaut. Sur une scène dont
   les structures sont parfaitement alignées sur la grille du capteur (façade,
   mire), elle confond contenu et rayures ; sur du contenu ordinaire elle

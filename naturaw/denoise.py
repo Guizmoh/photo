@@ -88,6 +88,14 @@ class DenoiseParams:
     refine: bool = True
     """Seconde passe de Wiener empirique (nettement meilleure, cout faible)."""
 
+    auto_strength: bool = True
+    """Attenuer la force quand le bruit mesure est negligeable.
+
+    A 100 ISO le bruit ne se voit pas : le debruiter ne gagne rien et coute
+    du detail (mesure sur mire a statistiques naturelles : -1 dB). La force
+    est donc ramenee progressivement a zero en dessous de 0,8 % d'ecart-type
+    a 18 % de gris, et pleine au-dela."""
+
     chroma_cleanup: float = 0.0
     """Passe supplementaire contre les plaques de couleur (0 = desactivee).
 
@@ -146,6 +154,14 @@ def _map_channels(func, count: int = 3):
         return [func(c) for c in range(count)]
     with ThreadPoolExecutor(max_workers=count) as pool:
         return list(pool.map(func, range(count)))
+
+
+def noise_scaled_strength(sigma: float, lo: float = 0.0025, hi: float = 0.008) -> float:
+    """Facteur [0,1] applique a la force selon le bruit reellement mesure."""
+    if sigma <= lo:
+        return 0.0
+    t = float(np.clip((sigma - lo) / max(hi - lo, 1e-9), 0.0, 1.0))
+    return t * t * (3.0 - 2.0 * t)
 
 
 def effective_grain(grain: float, sigma: float, floor: float = 0.3) -> float:
@@ -307,18 +323,31 @@ def denoise_linear_rgb(
             bright = match_size(bright_stack[min(j, len(bright_stack) - 1)], detail.shape)
             luma_masks.append(_structure_mask(detail, profile.channels[0][j].variance(bright)))
 
-    grain = effective_grain(params.grain, profile.luma_sigma(0.18), params.grain_floor)
+    sigma_luma = profile.luma_sigma(0.18)
+    strength = params.strength
+    if params.auto_strength:
+        factor = noise_scaled_strength(sigma_luma)
+        strength *= factor
+        if report is not None and factor < 0.99:
+            report["force_appliquee"] = (f"{strength:.2f} (bruit mesure {sigma_luma * 100:.2f} %"
+                                         f" : attenuation x{factor:.2f})")
+    if strength <= 1e-3:
+        if report is not None:
+            report["debruitage"] = (f"inutile : bruit mesure a {sigma_luma * 100:.2f} %, "
+                                    "image laissee intacte")
+        return rgb
+    grain = effective_grain(params.grain, sigma_luma, params.grain_floor)
     if report is not None:
         report["grain_applique"] = round(grain, 3)
 
-    chroma_strength = params.strength * params.chroma
+    chroma_strength = strength * params.chroma
 
     def run_channel(c: int) -> np.ndarray:
         details, residual = pyramids[c]
         if c == 0:
             return _denoise_channel(
                 details, residual, profile.channels[0], bright_stack,
-                strength=params.strength, grain=grain,
+                strength=strength, grain=grain,
                 masks=luma_masks or None, detail_amount=params.detail,
                 refine=params.refine)
         masks: Optional[List[np.ndarray]] = None

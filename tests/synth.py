@@ -36,6 +36,41 @@ def ssim(a: np.ndarray, b: np.ndarray, sigma: float = 1.5) -> float:
     return float(np.mean(num / den))
 
 
+def texture_mtf(out: np.ndarray, ref: np.ndarray, bands=(0.05, 0.10, 0.20, 0.35)):
+    """Conservation de la texture, par bande de frequence (methode du spectre croise).
+
+    Sur une mire "dead leaves", le rapport entre le spectre croise de l'image
+    traitee et le spectre de la reference donne la part du *signal* conservee
+    a chaque frequence. Contrairement a un simple rapport de spectres, il
+    ignore le bruit residuel : une image bruitee n'obtient donc pas une bonne
+    note en gardant du bruit a la place de la texture.
+
+    1,0 = texture intacte ; 0,5 = la moitie du detail de cette finesse a
+    disparu. Au-dessus de 1,0, l'image est accentuee.
+    """
+    a = out.mean(axis=2) if out.ndim == 3 else out
+    b = ref.mean(axis=2) if ref.ndim == 3 else ref
+    h, w = min(a.shape[0], b.shape[0]), min(a.shape[1], b.shape[1])
+    a = a[:h, :w].astype(np.float64)
+    b = b[:h, :w].astype(np.float64)
+    win = np.outer(np.hanning(h), np.hanning(w))
+    fa = np.fft.rfft2((a - a.mean()) * win)
+    fb = np.fft.rfft2((b - b.mean()) * win)
+    cross = np.real(fa * np.conj(fb))
+    power = np.abs(fb) ** 2
+    fy = np.fft.fftfreq(h)[:, None]
+    fx = np.fft.rfftfreq(w)[None, :]
+    rho = np.sqrt(fy ** 2 + fx ** 2)
+    out_vals = {}
+    for f in bands:
+        sel = (rho >= f * 0.8) & (rho < f * 1.25)
+        if np.count_nonzero(sel) < 8:
+            out_vals[f] = float("nan")
+            continue
+        out_vals[f] = float(cross[sel].sum() / max(power[sel].sum(), 1e-12))
+    return out_vals
+
+
 def gradient_energy(img: np.ndarray) -> float:
     return float(np.mean(cv2.magnitude(cv2.Sobel(img, cv2.CV_32F, 1, 0),
                                        cv2.Sobel(img, cv2.CV_32F, 0, 1))))
@@ -81,6 +116,94 @@ def architecture(h: int = 900, w: int = 1350, seed: int = 2) -> np.ndarray:
         cv2.rectangle(img, (x0, ground + int(h * 0.06)),
                       (x0 + int(w * 0.07), ground + int(h * 0.13)), col, -1)
     return np.clip(img, 0.004, 1.0).astype(np.float32)
+
+
+def dead_leaves(h: int = 800, w: int = 1200, seed: int = 0, rmin: float = 2.0,
+                rmax: float = 0.25, count: int = 0, colour: bool = True) -> np.ndarray:
+    """Mire "dead leaves" : disques empiles de rayons en loi de puissance.
+
+    C'est le modele de reference des statistiques d'images naturelles, et la
+    mire que l'industrie photo utilise pour mesurer la *conservation de la
+    texture* d'un debruiteur (norme ISO 19567-2) : son spectre en 1/f^2, ses
+    contours francs a toutes les echelles et ses gradients a queue lourde
+    reproduisent ce qui fait echouer les debruiteurs sur de vraies photos,
+    ce qu'une scene geometrique ne fait pas.
+    """
+    rng = np.random.default_rng(seed)
+    img = np.zeros((h, w, 3), np.float32)
+    r_max = rmax * min(h, w)
+    if count <= 0:
+        count = int(30 * (h * w) / (np.pi * rmin * r_max))
+    # rayons en p(r) ~ r^-3 : la loi qui rend la mire invariante d'echelle
+    u = rng.random(count).astype(np.float64)
+    radii = 1.0 / np.sqrt(u / (rmin ** -2 - r_max ** -2) + r_max ** -2)
+    xs = rng.integers(0, w, count)
+    ys = rng.integers(0, h, count)
+    if colour:
+        cols = rng.random((count, 3)).astype(np.float32)
+        # saturations variees mais realistes : on melange chaque teinte au gris
+        mix = rng.random((count, 1)).astype(np.float32) ** 1.5
+        grey = cols.mean(axis=1, keepdims=True)
+        cols = grey + mix * (cols - grey)
+    else:
+        cols = np.repeat(rng.random((count, 1)).astype(np.float32), 3, axis=1)
+    order = np.argsort(-radii)       # les grands disques d'abord
+    for i in order:
+        cv2.circle(img, (int(xs[i]), int(ys[i])), max(1, int(radii[i])),
+                   tuple(float(v) for v in cols[i]), -1, lineType=cv2.LINE_AA)
+    return np.clip(img * 0.9 + 0.03, 0.004, 1.0).astype(np.float32)
+
+
+def simulate_raw_capture(scene: np.ndarray, full_well_e: float = 2500.0,
+                         read_noise_e: float = 3.0, seed: int = 0,
+                         black: float = 0.0):
+    """Simule la prise de vue d'une scene par un capteur Bayer.
+
+    Le bruit est ajoute *au niveau du photosite*, avant dematricage : bruit de
+    photons (Poisson) et bruit de lecture (gaussien). C'est ce qui donne au
+    bruit sa correlation spatiale et ses couleurs apres dematricage -- le
+    bruit blanc ajoute apres coup, lui, ne ressemble a rien de reel.
+
+    ``full_well_e`` correspond a la sensibilite : 40000 e- ~ 100 ISO,
+    2500 e- ~ 1600 ISO, 600 e- ~ 6400 ISO, 150 e- ~ 25600 ISO.
+    Renvoie la mosaique Bayer RGGB en [0, 1].
+    """
+    rng = np.random.default_rng(seed)
+    h, w = scene.shape[:2]
+    h -= h % 2
+    w -= w % 2
+    img = np.clip(scene[:h, :w], 0.0, 1.0)
+    mosaic = np.zeros((h, w), np.float32)
+    mosaic[0::2, 0::2] = img[0::2, 0::2, 0]
+    mosaic[0::2, 1::2] = img[0::2, 1::2, 1]
+    mosaic[1::2, 0::2] = img[1::2, 0::2, 1]
+    mosaic[1::2, 1::2] = img[1::2, 1::2, 2]
+    electrons = mosaic * float(full_well_e)
+    noisy = rng.poisson(np.maximum(electrons, 0.0)).astype(np.float32)
+    noisy += rng.normal(0.0, float(read_noise_e), noisy.shape).astype(np.float32)
+    out = noisy / float(full_well_e) + float(black)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def write_dng_mosaic(path: str, mosaic: np.ndarray, white: int = 65535) -> str:
+    """Ecrit une mosaique Bayer deja formee dans un DNG lisible par LibRaw."""
+    import tifffile
+
+    raw = np.clip(mosaic * white, 0, white).astype(np.uint16)
+    extratags = [
+        (50706, 1, 4, (1, 4, 0, 0), True),
+        (50707, 1, 4, (1, 1, 0, 0), True),
+        (33421, 3, 2, (2, 2), True),
+        (33422, 1, 4, (0, 1, 1, 2), True),
+        (50708, 2, None, "naturaw-synth", True),
+        (50721, 10, 9, (1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1), True),
+        (50728, 5, 3, (1, 1, 1, 1, 1, 1), True),
+        (50717, 4, 1, (int(white),), True),
+        (50714, 3, 1, (0,), True),
+    ]
+    tifffile.imwrite(path, raw, photometric=32803, planarconfig="contig",
+                     extratags=extratags, compression=None)
+    return path
 
 
 def shake_kernel(size: int = 21, steps: int = 50, seed: int = 0,

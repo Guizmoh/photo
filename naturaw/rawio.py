@@ -114,6 +114,14 @@ def load_image(path: str, half_size: bool = False, demosaic: str = "ahd",
                 fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Off,
                 highlight_mode=highlight_mode,
                 half_size=bool(half_size),
+                # Par defaut LibRaw abaisse le niveau de blanc jusqu'au pixel
+                # le plus clair du fichier (seuil 0,75), ce qui fait varier
+                # l'exposition d'une photo a l'autre selon le bruit ou un
+                # reflet : mesure sur la meme scene, 0,279 contre 0,360 de
+                # moyenne, soit 29 % d'ecart. On garde le niveau de blanc
+                # declare, et c'est notre propre exposition automatique qui
+                # decide de la luminosite.
+                adjust_maximum_thr=0.0,
             )
             arr = raw.postprocess(**params)
         rgb = arr.astype(np.float32) / 65535.0

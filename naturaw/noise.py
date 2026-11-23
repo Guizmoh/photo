@@ -22,12 +22,23 @@ import numpy as np
 from .pyramid import analyse, gaussian_stack, match_size
 
 _MAD_TO_SIGMA = 1.4826
-# Le bruit decroit d'au moins ce facteur (en variance) d'un niveau au suivant :
-# mesure sur bruit blanc comme sur bruit correle, le rapport reel vaut ~0,25.
-# Le plafond empeche une texture fine omnipresente de gonfler l'estimation aux
-# niveaux grossiers, ce qui reviendrait a effacer le detail utile.
-_DECAY_CAP = 0.45
 _MAX_BLOCKS = 4000
+
+# Decroissance du bruit d'un niveau de pyramide au suivant, en variance.
+# Mesuree sur des captures simulees (scene -> mosaique Bayer -> bruit de
+# photons -> dematricage) : le premier passage enleve l'essentiel du bruit
+# haute frequence (x0,08), les suivants se comportent comme du bruit blanc
+# (x0,25). Le resultat est remarquablement stable d'une scene et d'une
+# sensibilite a l'autre (0,05 a 0,10 puis 0,20 a 0,27 sur toute la plage).
+#
+# Pourquoi predire plutot que mesurer : aux niveaux grossiers d'une image
+# riche en texture, *aucun* bloc n'est vide de structure, et la mesure
+# surestime le bruit jusqu'a vingt fois -- ce qui efface le detail. La mesure
+# reste utilisee comme garde-fou quand elle est *plus basse* que la
+# prediction (fichier deja debruite par le boitier, par exemple).
+_DECAY_FIRST = 0.08
+_DECAY_NEXT = 0.25
+_MEASURE_TOLERANCE = 1.5
 
 
 @dataclass
@@ -114,7 +125,7 @@ def _fit_line(x: np.ndarray, y: np.ndarray, weights: np.ndarray):
 def estimate_level_noise(details: Sequence[np.ndarray],
                          brightness_stack: Sequence[np.ndarray],
                          block: int = 20, bins: int = 16,
-                         percentile: float = 12.0, min_blocks: int = 6,
+                         percentile: float = 8.0, min_blocks: int = 6,
                          measure_levels: int = 4) -> List[ScaleNoise]:
     """Mesure ``var_j(I)`` pour chaque plan de details d'un canal."""
     models: List[ScaleNoise] = []
@@ -148,9 +159,13 @@ def estimate_level_noise(details: Sequence[np.ndarray],
                 var = float(np.percentile(sigma, percentile) ** 2)
                 models.append(ScaleNoise(0.0, var, measured=False))
         if len(models) >= 2:
+            # on borne par la prediction issue du niveau precedent
             prev, last = models[-2], models[-1]
-            last.a = min(last.a, prev.a * _DECAY_CAP)
-            last.b = min(last.b, prev.b * _DECAY_CAP)
+            ratio = _DECAY_FIRST if len(models) == 2 else _DECAY_NEXT
+            ceiling = ratio * _MEASURE_TOLERANCE
+            last.a = min(last.a, prev.a * ceiling)
+            last.b = min(last.b, prev.b * ceiling)
+            last.measured = last.measured and (last.a > 0 or last.b > 0)
     return extend_models(models, len(details))
 
 
@@ -161,7 +176,8 @@ def extend_models(models: List[ScaleNoise], levels: int) -> List[ScaleNoise]:
         return [ScaleNoise(0.0, 0.0, measured=False) for _ in range(levels)]
     while len(out) < levels:
         ref = out[-1]
-        out.append(ScaleNoise(ref.a * 0.25, ref.b * 0.25, measured=False))
+        ratio = _DECAY_FIRST if len(out) == 1 else _DECAY_NEXT
+        out.append(ScaleNoise(ref.a * ratio, ref.b * ratio, measured=False))
     return out
 
 
