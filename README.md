@@ -280,10 +280,41 @@ exposition +2,50 EV, bougé non détecté, netteté 0,60, redressement +2,00°
 bas bruit, 34,7 → **36,2 dB** à 2 % de bruit, contre 35,5 dB / SSIM 0,945 pour
 un masque flou classique.
 
-**Déflou de bougé** (mode `auto`) : bougé rectiligne de 9 px, +1,7 dB et SSIM
-0,843 → 0,887 ; bougé de main de 25 px, +2,0 dB et SSIM 0,696 → 0,793. Une
-image nette, un flou de mise au point ou une estimation instable sont laissés
-**strictement inchangés**.
+**Déflou de bougé**, sur captures simulées (le flou est appliqué *avant* le
+capteur, comme dans la réalité) et après débruitage :
+
+| bougé | 1600 ISO | 6400 ISO | 25600 ISO |
+|---|---|---|---|
+| rectiligne 9 px | +1,18 dB / SSIM +0,125 | +1,07 / +0,115 | +0,40 / +0,050 |
+| rectiligne 15 px | +1,06 / +0,123 | +0,96 / +0,116 | +0,54 / +0,066 |
+| bougé de main 25 px | +0,18 / +0,023 | +0,05 / +0,007 | *non détecté* |
+
+Six images nettes sur six sont laissées **strictement inchangées**, de même
+qu'un flou de mise au point ou une estimation instable.
+
+Ces chiffres valent plusieurs fois ceux de la version précédente, grâce à une
+décision : le noyau estimé est remplacé par la **trajectoire rectiligne
+de même étendue et même orientation**. Un noyau libre estimé sur quelques
+imagettes bruitées porte des lobes parasites qui font diverger la
+déconvolution ; une droite propre récupère jusqu'à *la totalité* du gain
+qu'aurait donné le vrai noyau (mesuré : +1,06 dB contre +1,06 dB avec le
+noyau exact sur un bougé de 15 px). Pour un bougé en courbe, le noyau libre
+reste disponible : `--deflou-noyau-libre`.
+
+**La dose suit la confiance.** Les risques ne sont pas symétriques : une
+déconvolution juste rapporte de 0,3 à 1,8 dB, une déconvolution fondée sur une
+estimation fausse en coûte 6,8 (mesuré sur une scène où l'estimateur se fait
+piéger par des rangées de fenêtres régulières — la périodicité est le piège
+classique de la déconvolution aveugle). La dose est donc proportionnelle à
+l'anisotropie du noyau trouvé : pleine au-delà de 2,6, nulle en dessous de
+1,8. Les cas francs gardent tout, les cas douteux ne reçoivent presque rien,
+et le cas piégé ressort **bit pour bit identique** à l'original.
+
+Cinq autres façons de distinguer une vraie trainée d'un faux positif ont été
+essayées et mesurées sans succès sur ce type de scène (ajustement du
+log-spectre, cohérence d'échelle, contraste directionnel normalisé,
+auto-cohérence après déconvolution d'essai, périodicité directionnelle).
+C'est pourquoi la prudence l'emporte ici sur l'ambition.
 
 **Redressement** : erreur inférieure à 0,05° entre 0,3° et 7,5° d'inclinaison ;
 une scène sans structure n'est pas touchée.
@@ -331,7 +362,10 @@ Mémoire : environ huit fois la taille de l'image en float32 (≈ 2,5 Go pour un
   plus sûre et la plus efficace. `-b on` assouplit les tests, `-b force` les
   supprime (au risque de dégrader une image nette).
 * Le déflou **auto** ne détecte pas les bougés inférieurs à ~6 px : ils ne se
-  distinguent pas du plancher de l'estimateur.
+  distinguent pas du plancher de l'estimateur. Et sur une scène pauvre en
+  texture, il refuse souvent d'agir même quand il y a du bougé (7 cas sur 9
+  dans le banc d'essai sur scène d'architecture) : il préfère ne rien faire
+  plutôt que d'appliquer un noyau faux.
 * La **mise au point ratée** n'est pas corrigée (flou isotrope) : c'est un
   autre problème, et le déconvoluer à l'aveugle abîme plus qu'il ne répare.
 * La **mesure du bruit est calibrée pour des fichiers d'appareil** (12 Mpx et
@@ -404,6 +438,7 @@ Principales options (`naturaw --help` pour la liste complète) :
 | `-b, --deflou` | `off`, `auto`, `on`, `force` | `auto` |
 | `--deflou-dose` | dose de déconvolution | `0.8` |
 | `--deflou-longueur`, `--deflou-angle` | bougé connu, imposé | — |
+| `--deflou-noyau-libre` | noyau libre au lieu de la trajectoire rectiligne | — |
 | `-s, --redressement` | `auto` ou `off` | `auto` |
 | `--angle`, `--angle-max`, `--confiance` | redressement imposé / limites | — / `8°` / `0.22` |
 | `--recadrage` | `aspect`, `max`, `none` | `aspect` |

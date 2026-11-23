@@ -114,6 +114,26 @@ def test_blind_estimate_finds_direction_on_textured_scene():
     assert min(abs(est.angle - 115), 180 - abs(est.angle - 115)) < 25
 
 
+def test_estimated_kernel_is_projected_on_a_straight_trajectory():
+    """Le noyau retenu doit etre une trainee propre, pas le noyau libre brut.
+
+    Un noyau libre estime sur quelques imagettes porte des lobes parasites qui
+    font diverger la deconvolution ; la droite de meme etendue et meme angle
+    recupere jusqu'a la totalite du gain qu'aurait donne le vrai noyau.
+    """
+    tex = np.clip(np.dstack([synth.texture(700, 1000, s) * k + 0.05
+                             for s, k in ((1, 0.6), (2, 0.55), (3, 0.45))]), 0.01, 1).astype(np.float32)
+    truth = linear_motion_kernel(13, 115)
+    blurred = np.stack([convolve(tex[..., c], truth) for c in range(3)], -1)
+    est = analyze_blur(luminance(blurred), DeblurParams())
+    assert est.reliable and est.projected
+    assert est.free_kernel is not None
+    # la trainee retenue est fine dans sa largeur, contrairement au noyau libre
+    assert kernel_moments(est.kernel)[2] > kernel_moments(est.free_kernel)[2]
+    free = analyze_blur(luminance(blurred), DeblurParams(free_kernel=True))
+    assert not free.projected
+
+
 def test_off_mode_returns_input(scene):
     assert deblur_linear_rgb(scene, DeblurParams(mode="off")) is scene
 

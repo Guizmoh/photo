@@ -136,6 +136,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="angle du bouge impose (degres)")
     g.add_argument("--deflou-noyau", type=int, default=31, metavar="PX",
                    help="taille du noyau estime (defaut : %(default)s)")
+    g.add_argument("--deflou-noyau-libre", action="store_true",
+                   help="deconvoluer avec le noyau libre estime au lieu de sa "
+                        "projection rectiligne (utile pour un bouge en courbe)")
     g.add_argument("--deflou-canaux", default="luma", choices=["luma", "rgb"],
                    help="luma : transfert de nettete sans toucher aux couleurs "
                         "(defaut) ; rgb : deconvolution de chaque canal")
@@ -217,6 +220,7 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         channels=a.deflou_canaux,
         length=a.deflou_longueur,
         angle=a.deflou_angle,
+        free_kernel=getattr(a, "deflou_noyau_libre"),
     )
     tone_shadows = 0.0
     tone_auto = True

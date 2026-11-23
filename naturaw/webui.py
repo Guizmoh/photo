@@ -59,6 +59,7 @@ def _settings_from_payload(p: Dict[str, Any]) -> Settings:
         strength=float(p.get("deflou_dose", DeblurParams.strength)),
         length=float(p.get("deflou_longueur", 0.0) or 0.0),
         angle=float(p.get("deflou_angle", 0.0) or 0.0),
+        free_kernel=bool(p.get("deflou_noyau_libre", False)),
     )
     deskew = DeskewParams(
         enabled=bool(p.get("redressement", True)),
