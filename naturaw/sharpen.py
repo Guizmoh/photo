@@ -121,11 +121,19 @@ def sharpen_linear_rgb(rgb: np.ndarray, params: SharpenParams = SharpenParams(),
         weight = cv2.resize(weight, (luma.shape[1], luma.shape[0]),
                             interpolation=cv2.INTER_LINEAR)
 
-    target = luma + weight * (sharp - luma)
+    # calcul sur place : sur un 24 Mpx chaque tampon pese 96 Mo
+    np.subtract(sharp, luma, out=sharp)
+    np.multiply(sharp, weight, out=sharp)
+    del weight
+    np.add(sharp, luma, out=sharp)          # sharp = cible
     eps = 2e-3
-    gain = (target + eps) / (luma + eps)
+    np.add(sharp, eps, out=sharp)
+    gain = sharp
+    np.divide(gain, luma + eps, out=gain)
     np.clip(gain, 0.5, 2.5, out=gain)
+    del luma
     out = rgb * gain[..., None]
+    del gain
     np.clip(out, 0.0, None, out=out)
     if report is not None:
         report["nettete"] = f"dose {amount:.2f}, rayon {params.radius:.1f} px"

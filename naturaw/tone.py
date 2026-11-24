@@ -21,10 +21,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import cv2
 import numpy as np
 
 from .colorspace import luminance
-from .filters import guided_filter
+from .filters import guided_filter, resize_long_side
 
 _EPS = 1e-4
 
@@ -69,6 +70,32 @@ def auto_shadow_amount(rgb: np.ndarray, target: float = 0.12,
     # chaque diaphragme manquant vaut un tiers d'ouverture
     stops = float(np.log2(target / max(low, 1e-5)))
     return float(np.clip(stops / 3.0, 0.0, limit))
+
+
+def planned_gain(rgb: np.ndarray, params: ToneParams = ToneParams()) -> Optional[np.ndarray]:
+    """Gain de luminance que la recuperation tonale appliquera, par pixel.
+
+    Sert a prevenir le debruiteur : une ombre qui sera remontee de trois
+    diaphragmes doit etre nettoyee comme si son bruit etait trois fois plus
+    grand, sinon on ne fait que l'amplifier proprement.
+    """
+    shadows = float(params.shadows)
+    if params.auto and shadows <= 0.0:
+        shadows = auto_shadow_amount(rgb, limit=params.auto_max)
+    if shadows <= 1e-3:
+        return None
+    rgb = np.ascontiguousarray(rgb, dtype=np.float32)
+    small, scale = resize_long_side(rgb, 900)
+    lum = np.maximum(luminance(small), _EPS)
+    base = guided_filter(np.log2(lum), np.log2(lum),
+                         max(4, int(round(params.radius * max(small.shape[:2])))), 0.2)
+    darkness = np.clip((-2.0 - base) / 6.0 + 0.5, 0.0, 1.0)
+    darkness *= darkness
+    gain = np.exp2((3.0 * shadows) * darkness)
+    if scale < 1.0:
+        gain = cv2.resize(gain, (rgb.shape[1], rgb.shape[0]),
+                          interpolation=cv2.INTER_LINEAR)
+    return gain.astype(np.float32, copy=False)
 
 
 def tone_rescue(rgb: np.ndarray, params: ToneParams = ToneParams(),

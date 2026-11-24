@@ -55,6 +55,45 @@ def test_no_halo_around_a_strong_edge():
     assert float(dark_side.max() / dark_side.min()) < 1.05
 
 
+def test_planned_gain_describes_the_coming_lift(scene):
+    from naturaw.tone import planned_gain
+    dark = np.clip(scene * 0.1, 0, 1).astype(np.float32)
+    gain = planned_gain(dark, ToneParams(shadows=0.8, auto=False))
+    assert gain is not None and gain.shape == dark.shape[:2]
+    assert float(gain.max()) > 1.5          # les ombres seront bien remontees
+    assert float(gain.min()) >= 0.99        # et rien ne sera assombri
+    assert planned_gain(scene, ToneParams(shadows=0.0, auto=False)) is None
+
+
+def test_denoising_anticipates_the_shadow_lift():
+    """Debruiter en sachant ce qui sera amplifie, et non apres coup.
+
+    Une ombre remontee de trois diaphragmes doit etre nettoyee comme si son
+    bruit etait trois fois plus fort : sinon on l'amplifie proprement.
+    """
+    import cv2
+    from naturaw.colorspace import linear_to_srgb
+    from naturaw.denoise import DenoiseParams, denoise_linear_rgb
+    from naturaw.tone import planned_gain
+
+    scene = synth.architecture(500, 760)
+    dark = np.clip(scene * 2.0 ** -3.0, 0, 1).astype(np.float32)
+    noisy = synth.add_photon_noise(dark, 2.5e-3, 1.5e-4, seed=4)
+    params = ToneParams(shadows=0.8, auto=False)
+    flat = (slice(20, 140), slice(20, 400))
+
+    def grain(img):
+        z = linear_to_srgb(np.clip(img, 0, 1))[flat].mean(-1)
+        return float(np.std(z - cv2.GaussianBlur(z, (0, 0), 2.0)))
+
+    naive = tone_rescue(denoise_linear_rgb(noisy, DenoiseParams()), params)
+    aware = tone_rescue(denoise_linear_rgb(noisy, DenoiseParams(),
+                                           visibility=planned_gain(noisy, params)), params)
+    reference = tone_rescue(dark, params)
+    assert grain(aware) < grain(naive) * 0.8
+    assert grain(aware) < grain(reference) * 2.5
+
+
 def test_explicit_amount_overrides_auto(scene):
     out = tone_rescue(scene, ToneParams(shadows=0.5, auto=False))
     assert np.median(luminance(out)) > np.median(luminance(scene))

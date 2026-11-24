@@ -249,13 +249,22 @@ def _denoise_channel(details: List[np.ndarray], residual: np.ndarray,
                      models: List[ScaleNoise], bright_stack: Sequence[np.ndarray],
                      strength: float, grain: float = 0.0,
                      masks: Optional[Sequence[np.ndarray]] = None,
-                     detail_amount: float = 0.0, refine: bool = True) -> np.ndarray:
-    """Applique le Wiener local a tous les niveaux, puis reconstruit."""
+                     detail_amount: float = 0.0, refine: bool = True,
+                     visibility: Optional[np.ndarray] = None) -> np.ndarray:
+    """Applique le Wiener local a tous les niveaux, puis reconstruit.
+
+    ``visibility`` est le gain que les etapes suivantes appliqueront a chaque
+    pixel (la remontee des ombres) : le bruit y est traite comme s'il etait
+    deja amplifie d'autant.
+    """
     out_levels = []
     for j, detail in enumerate(details):
         bright = match_size(bright_stack[min(j, len(bright_stack) - 1)], detail.shape)
         k = strength * _LEVEL_WEIGHT[min(j, len(_LEVEL_WEIGHT) - 1)]
         variance = models[j].variance(bright) * (k * k)
+        if visibility is not None:
+            vis = match_size(visibility, detail.shape)
+            variance = variance * (vis * vis)
         mask = masks[j] if masks is not None and j < len(masks) else None
         kept = _wiener_level(detail, variance, mask, detail_amount, refine)
         if grain > 0.0 and j <= 1:
@@ -301,8 +310,15 @@ def denoise_linear_rgb(
     params: DenoiseParams = DenoiseParams(),
     profile: Optional[NoiseProfile] = None,
     report: Optional[dict] = None,
+    visibility: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Debruite une image RGB lineaire float32 dans [0, ~1]."""
+    """Debruite une image RGB lineaire float32 dans [0, ~1].
+
+    ``visibility`` : gain que les etapes suivantes appliqueront (remontee des
+    ombres). Le bruit d'une zone qui sera eclaircie de trois diaphragmes est
+    alors traite comme trois fois plus fort, au lieu d'etre amplifie apres
+    coup.
+    """
     if params.strength <= 0.0:
         return rgb
     rgb = np.ascontiguousarray(rgb, dtype=np.float32)
@@ -357,7 +373,7 @@ def denoise_linear_rgb(
                 details, residual, profile.channels[0], bright_stack,
                 strength=strength, grain=grain,
                 masks=luma_masks or None, detail_amount=params.detail,
-                refine=params.refine)
+                refine=params.refine, visibility=visibility)
         masks: Optional[List[np.ndarray]] = None
         if params.detail > 0.0:
             masks = []
@@ -371,31 +387,30 @@ def denoise_linear_rgb(
         return _denoise_channel(
             details, residual, profile.channels[c], bright_stack,
             strength=chroma_strength, grain=0.0, masks=masks,
-            detail_amount=0.9 * max(params.detail, 0.2), refine=params.refine)
+            detail_amount=0.9 * max(params.detail, 0.2), refine=params.refine,
+            visibility=visibility)
 
-    out = np.empty_like(ycc)
-    for c, chan in enumerate(_map_channels(run_channel)):
-        out[..., c] = chan
+    channels = _map_channels(run_channel)
     # on libere les pyramides (trois fois la taille de l'image) sans delier
     # les noms, auxquels la fermeture ci-dessus fait reference
     pyramids.clear()
     luma_masks.clear()
 
-    _chroma_cleanup(out, profile, float(np.clip(params.chroma_cleanup, 0.0, 1.0)))
-
-    if params.safety > 0.0:
-        # Filet de securite, applique en dernier : aucun canal ne s'ecarte de
-        # l'original de plus de ``safety`` ecarts-types de bruit. Un debruiteur
-        # multi-echelle peut sinon, au voisinage d'un aplat tres sature,
-        # reconstituer une couleur franche a partir d'un niveau grossier.
-        # la borne suit la luminosite, qui est lisse : on la calcule en
-        # demi-resolution (racine carree comprise) puis on l'interpole
-        bright_small = bright_stack[1] if len(bright_stack) > 1 else bright_stack[0]
-        for c in range(3):
+    # Le filet de securite est applique canal par canal, juste avant d'ecrire
+    # dans le tampon d'entree : on evite ainsi de garder en memoire l'original
+    # et le resultat en meme temps (288 Mo chacun sur un 24 Mpx).
+    bright_small = bright_stack[1] if len(bright_stack) > 1 else bright_stack[0]
+    out = ycc
+    for c, chan in enumerate(channels):
+        if params.safety > 0.0:
             limit = params.safety * np.sqrt(profile.channels[c][0].variance(bright_small))
-            limit = _full(limit, out.shape[:2])
-            np.clip(out[..., c], ycc[..., c] - limit, ycc[..., c] + limit,
-                    out=out[..., c])
+            limit = _full(limit, chan.shape[:2])
+            np.clip(chan, out[..., c] - limit, out[..., c] + limit, out=chan)
+        out[..., c] = chan
+        channels[c] = None
+    del channels
+
+    _chroma_cleanup(out, profile, float(np.clip(params.chroma_cleanup, 0.0, 1.0)))
 
     rgb_out = ycocg_to_rgb(out)
     np.clip(rgb_out, 0.0, None, out=rgb_out)

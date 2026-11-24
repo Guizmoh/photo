@@ -12,7 +12,8 @@ from . import __version__
 from .deblur import DeblurParams
 from .denoise import PRESETS, DenoiseParams
 from .deskew import DeskewParams
-from .pipeline import Settings, collect_inputs, process_many, summarize
+from .pipeline import (Settings, auto_jobs, collect_inputs, process_many,
+                       summarize)
 from .rescue import RescueParams
 from .sharpen import SharpenParams
 from .tone import ToneParams
@@ -178,8 +179,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "Defaut : %(default)s")
 
     g = p.add_argument_group("divers")
-    g.add_argument("-j", "--jobs", type=int, default=1,
-                   help="nombre de fichiers traites en parallele (defaut : %(default)s)")
+    g.add_argument("-j", "--jobs", default="auto", metavar="N",
+                   help="nombre de photos traitees en parallele : un nombre, ou "
+                        "auto (selon les coeurs et la memoire). Defaut : %(default)s")
     g.add_argument("--apercu", action="store_true",
                    help="apercu de controle : l'image entiere reduite, plus une "
                         "zone a 100 %% traitee exactement comme le fichier final "
@@ -304,7 +306,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     def on_done(done: int, count: int, rep) -> None:
         print(f"[{done}/{count}] {summarize(rep)}", flush=True)
 
-    reports = process_many(files, a.sortie, settings, jobs=a.jobs, progress=on_done,
+    jobs = a.jobs
+    if str(jobs).lower() in ("auto", ""):
+        jobs = auto_jobs(files) if len(files) > 1 else 1
+    else:
+        try:
+            jobs = max(1, int(jobs))
+        except ValueError:
+            raise SystemExit(f"valeur invalide pour --jobs : {a.jobs!r}")
+    jobs = max(1, min(jobs, len(files)))      # inutile d'ouvrir plus de processus
+    if jobs > 1:
+        print(f"  ({jobs} photos traitees de front)")
+    reports = process_many(files, a.sortie, settings, jobs=jobs, progress=on_done,
                            preview=a.apercu)
 
     failed = [r for r in reports if "erreur" in r]

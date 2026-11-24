@@ -181,7 +181,7 @@ bruit, rien n'est accentué. C'est ce qui la sépare d'un masque flou, qui
 remonte le bruit autant que le détail (mesure : 36,6 dB / SSIM 0,963 contre
 35,5 dB / 0,945).
 
-### 5. Ouverture des ombres
+### 5. Ouverture des ombres, anticipée par le débruitage
 
 C'est ce qui sauve vraiment une photo sous-exposée. Un gain global brûle le
 ciel ; une courbe en S écrase le contraste local. naturaw sépare la luminance
@@ -194,6 +194,13 @@ appliqué en rapport sur les trois canaux, donc à teinte constante.
 
 À −3 EV, la médiane passe de 0,025 à 0,131 sans qu'aucune haute lumière ne
 soit écrêtée.
+
+Surtout, le débruitage **sait d'avance** ce qui sera éclairci : la carte de
+gain prévue par cette étape lui est passée, et une ombre qui sera remontée de
+trois diaphragmes y est nettoyée comme si son bruit était trois fois plus
+fort. Sans cela, on amplifie proprement du bruit. Mesure sur un aplat sombre
+d'une photo à −3 EV : grain résiduel **0,0133 → 0,0057**, soit le niveau de
+la scène propre (0,0056).
 
 ### 6. Redressement
 
@@ -348,8 +355,19 @@ l'appui sur 24 Mpx :
   partout que si un échantillon en contient (1,4 s → 0,06 s), et l'analyse de
   bougé s'arrête sur une seule imagette quand l'image est manifestement nette.
 
-Mémoire : environ huit fois la taille de l'image en float32 (≈ 2,5 Go pour un
-60 Mpx). `--cote-max` ou `--demi-taille` pour les machines justes.
+**Traitement par lot.** `--jobs auto` (le défaut) choisit le nombre de photos
+traitées de front d'après les cœurs et la mémoire libre. Mesure sur six
+photos de 8,6 Mpx et quatre cœurs : 23,8 s à un seul processus, **10,9 s à
+quatre** — une photo seule ne sature pas les cœurs, en traiter plusieurs de
+front oui.
+
+Mémoire mesurée : environ **60 Mo par mégapixel**, soit 1,4 Go pour un 24 Mpx
+et 2,7 Go pour un 45 Mpx. `--cote-max`, `--demi-taille` ou `-j 1` pour les
+machines justes.
+
+Le résultat ne dépend ni du nombre de processus ni du nombre de fils : à
+réglages égaux, deux exécutions donnent des fichiers identiques au bit près
+(c'est vérifié par les tests).
 
 ## Limites, dites franchement
 
@@ -458,7 +476,7 @@ Principales options (`naturaw --help` pour la liste complète) :
 | `-f, --format` | `tiff16`, `tiff8`, `png16`, `png`, `jpeg` | `tiff16` |
 | `--exposition` | `auto`, `non`, ou une correction en EV | `auto` |
 | `--cote-max`, `--demi-taille` | traitement allégé | — |
-| `-j, --jobs` | fichiers traités en parallèle | `1` |
+| `-j, --jobs` | photos traitées en parallèle, ou `auto` | `auto` |
 | `--rapport` | rapport JSON détaillé | — |
 
 Chaque fichier traité affiche ce qui a été mesuré et décidé :

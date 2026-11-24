@@ -29,7 +29,7 @@ from .deskew import DeskewParams, deskew_image
 from .noise import quick_sigma
 from .rescue import RescueParams, apply_rescue
 from .sharpen import SharpenParams, sharpen_linear_rgb
-from .tone import ToneParams, tone_rescue
+from .tone import ToneParams, planned_gain, tone_rescue
 from . import __version__
 from .rawio import (IMAGE_EXTENSIONS, RAW_EXTENSIONS, auto_exposure,
                     default_output_name, load_image, save_image)
@@ -116,7 +116,14 @@ def process_array(rgb: np.ndarray, settings: Settings,
         progress("debruitage", 0.25)
     t0 = time.time()
     if settings.denoise.strength > 0:
-        rgb = denoise_linear_rgb(rgb, settings.denoise, report=report)
+        # Si les ombres vont etre remontees, le debruiteur doit le savoir :
+        # sinon il nettoie un bruit juge faible, que l'on amplifie ensuite.
+        visibility = planned_gain(rgb, settings.tone)
+        if visibility is not None and report is not None:
+            report["visibilite"] = (f"debruitage renforce jusqu'a x{float(visibility.max()):.1f} "
+                                    "dans les ombres a remonter")
+        rgb = denoise_linear_rgb(rgb, settings.denoise, report=report,
+                                 visibility=visibility)
         report["temps_debruitage"] = round(time.time() - t0, 2)
     else:
         report["noise_luma_sigma"] = 0.0
@@ -296,6 +303,36 @@ def collect_inputs(paths: Sequence[str], recursive: bool = False,
             seen.add(key)
             uniq.append(p)
     return uniq
+
+
+def auto_jobs(paths: Sequence[str] = (), limit: int = 8) -> int:
+    """Nombre de photos a traiter de front, choisi tout seul.
+
+    Deux contraintes : les coeurs disponibles et la memoire. Mesure sur ce
+    moteur : une photo en cours de traitement occupe environ 60 Mo par
+    megapixel, tout compris. La taille est estimee sur le premier fichier du
+    lot (un RAW compresse pese environ 1,2 octet par pixel).
+
+    Une photo par coeur est le reglage le plus rapide (mesure : six photos de
+    8,6 Mpx en 23,8 s a un seul processus, 10,9 s a quatre sur quatre coeurs),
+    parce que le traitement d'une seule image ne sature pas les coeurs.
+    """
+    cpus = os.cpu_count() or 2
+    jobs = max(1, min(int(limit), cpus))
+    try:
+        free = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        return jobs
+    megapixels = 24.0
+    for p in paths[:1]:
+        try:
+            megapixels = max(1.0, os.path.getsize(p) / 1.2e6)
+        except OSError:
+            pass
+    need = megapixels * 70e6                  # ~60 Mo/Mpx mesures, avec marge
+    if need > 0:
+        jobs = max(1, min(jobs, int(free * 0.7 // need)))
+    return jobs
 
 
 def _pool_context():
