@@ -190,7 +190,8 @@ def preview_file(path: str, out_path: str, settings: Settings,
     for target, img in ((out_path, whole), (zoom_path, detail)):
         save_image(target, img, fmt=settings.fmt, quality=settings.quality,
                    transfer=settings.transfer, dither=settings.dither,
-                   metadata={"logiciel": "naturaw " + __version__, "apercu": True})
+                   metadata={"logiciel": "naturaw " + __version__, "apercu": True},
+                   capture=loaded.capture, software=f"naturaw {__version__}")
     report["sortie_100"] = zoom_path
     report["dimensions_sortie"] = f"{whole.shape[1]}x{whole.shape[0]}"
     report["duree"] = round(time.time() - start, 2)
@@ -218,10 +219,13 @@ def process_file(path: str, out_path: str, settings: Settings,
 
     if progress:
         progress("ecriture", 0.95)
-    meta = {"logiciel": "naturaw 0.1.0", "source": os.path.basename(path),
+    meta = {"logiciel": f"naturaw {__version__}", "source": os.path.basename(path),
             "traitement": {k: v for k, v in report.items() if isinstance(v, (str, int, float))}}
+    if loaded.capture:
+        report["prise_de_vue"] = loaded.capture.summary()
     save_image(out_path, out, fmt=settings.fmt, quality=settings.quality,
-               transfer=settings.transfer, metadata=meta, dither=settings.dither)
+               transfer=settings.transfer, metadata=meta, dither=settings.dither,
+               capture=loaded.capture, software=f"naturaw {__version__}")
     report["duree"] = round(time.time() - start, 2)
     if progress:
         progress("termine", 1.0)
@@ -439,6 +443,8 @@ def summarize(report: Dict[str, Any]) -> str:
         return f"ECHEC  {os.path.basename(report.get('entree', '?'))} : {report['erreur']}"
     lines = [f"{os.path.basename(report.get('entree', '?'))}  "
              f"({report.get('dimensions', '?')}, {report.get('megapixels', '?')} Mpx)"]
+    if report.get("prise_de_vue"):
+        lines.append(f"   prise de vue      : {report['prise_de_vue']}")
     if report.get("noise_sigma"):
         lines.append(f"   bruit mesure      : {report['noise_sigma']}")
     if report.get("pixels_chauds"):

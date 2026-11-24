@@ -35,8 +35,11 @@ pip install -e .
 ```
 
 Dépendances : `numpy`, `scipy`, `opencv-python-headless`, `rawpy` (LibRaw),
-`tifffile`, `imageio`. L'interface graphique n'utilise que la bibliothèque
-standard — rien à installer de plus, et rien ne sort de la machine.
+`tifffile`, `imageio`. Deux dépendances facultatives, `exifread` et `piexif`,
+servent à recopier les métadonnées de prise de vue ; sans elles tout
+fonctionne, mais les fichiers produits n'ont ni date ni boîtier. L'interface
+graphique n'utilise que la bibliothèque standard — rien à installer de plus,
+et rien ne sort de la machine.
 
 Formats lus : tous les RAW gérés par LibRaw (CR2, CR3, NEF, ARW, RAF, ORF,
 RW2, DNG, PEF, SRW, IIQ…) ainsi que TIFF/PNG/JPEG déjà développés.
@@ -408,9 +411,12 @@ réglages égaux, deux exécutions donnent des fichiers identiques au bit près
 * Aucun **profil ICC** n'est incorporé aux fichiers écrits. La sortie par
   défaut est en sRGB ; les autres espaces (`--espace adobe|prophoto|raw`) sont
   pour qui gère sa couleur lui-même.
-* Les **métadonnées EXIF ne sont pas recopiées** dans le fichier de sortie ;
-  un résumé du traitement est écrit dans la description du TIFF, et
-  `--rapport` produit un JSON complet.
+* Les **métadonnées de prise de vue sont recopiées** : date, boîtier,
+  objectif, exposition, auteur, copyright et position GPS. En JPEG via un
+  bloc EXIF complet, en TIFF via les étiquettes standard (le PNG n'en reçoit
+  pas). Cela demande `exifread` et `piexif` ; sans eux le traitement se fait
+  quand même, sans métadonnées. Un résumé du traitement est écrit dans la
+  description du TIFF, et `--rapport` produit un JSON complet.
 * La validation s'appuie sur des RAW de **synthèse** (DNG Bayer fabriqués par
   le dépôt), faute de fichiers d'appareil dans l'environnement de
   développement. Les réglages par défaut sont donc calés sur un bruit
@@ -483,6 +489,7 @@ Chaque fichier traité affiche ce qui a été mesuré et décidé :
 
 ```
 [1/1] essai.dng  (1650x1100, 1.8 Mpx)
+   prise de vue      : Nikon Z 8  NIKKOR Z 35mm f/1.8  1/400 s  f/1.8  3200 ISO
    bruit mesure      : Y=5.36%  Co=5.96%  Cg=5.23%
    pixels chauds     : 2160 pixels corriges (0.0397 %)
    debruitage        : force 1.00, chroma x1.5, grain 0.18, 2 passes, 4 niveaux
@@ -522,6 +529,7 @@ propre = denoise_linear_rgb(image_lineaire, DenoiseParams())
 | `naturaw/filters.py` | starlet, filtre guidé, bilatéral joint |
 | `naturaw/colorspace.py` | YCoCg, courbes de transfert |
 | `naturaw/rawio.py` | lecture LibRaw, écriture TIFF/PNG/JPEG |
+| `naturaw/metadata.py` | reprise de l'EXIF (date, boîtier, objectif, GPS) |
 | `naturaw/pipeline.py` | enchaînement complet et rapports |
 | `naturaw/cli.py`, `naturaw/webui.py` | ligne de commande, interface locale |
 | `tests/` | 98 tests, dont la fabrication de RAW de synthèse |

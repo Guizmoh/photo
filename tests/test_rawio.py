@@ -57,8 +57,29 @@ def test_write_and_reread(tmp_path, fmt, ext):
 def test_auto_exposure_is_bounded():
     dark = np.full((32, 32, 3), 0.01, np.float32)
     bright = np.full((32, 32, 3), 1.0, np.float32)
-    assert 1.0 < auto_exposure(dark) <= 2.0 ** 2.5 + 1e-6
+    assert 1.0 < auto_exposure(dark) <= 2.0 ** 3.5 + 1e-6
     assert auto_exposure(bright) >= 0.5
+
+
+def test_auto_exposure_respects_the_mood_of_the_scene():
+    """Deux contraintes : ne pas bruler, et ne pas reveiller une scene sombre."""
+    rng = np.random.default_rng(0)
+    base = rng.random((200, 300, 3)).astype(np.float32)
+
+    snow = np.clip(base * 0.3 + 0.55, 0, 1)        # scene claire
+    night = np.clip(base * 0.02, 0, 1)             # scene nocturne sans lumiere vive
+    night[20:30, 40:60] = 0.9                      # un lampadaire
+    under = np.clip(base * 0.5 * 0.08, 0, 1)       # vraie sous-exposition
+
+    # la neige ne doit pas etre grisee, ni brulee
+    g_snow = auto_exposure(snow)
+    assert 0.9 <= g_snow <= 1.2
+    # la nuit reste la nuit : le lampadaire interdit de tout eclaircir
+    assert auto_exposure(night) < 1.3
+    # la photo sous-exposee est remontee franchement
+    g_under = auto_exposure(under)
+    assert g_under > 3.0
+    assert float(np.percentile(under * g_under, 99.7)) <= 1.0
 
 
 def test_output_naming():

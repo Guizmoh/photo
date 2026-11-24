@@ -193,11 +193,17 @@ def _full(img: np.ndarray, shape) -> np.ndarray:
 
 
 def _local_energy(detail: np.ndarray, reduced: bool):
-    """Energie locale moyenne, eventuellement calculee en demi-resolution."""
+    """Energie locale moyenne, eventuellement calculee en demi-resolution.
+
+    Le resultat est borne a zero : sur une image sans bruit, les carres valent
+    1e-16 et la somme glissante du filtre de moyenne peut rendre un tout petit
+    negatif (annulation en virgule flottante). Sa racine carree donnerait un
+    NaN qui se propagerait dans toute l'image.
+    """
     sq = detail * detail
-    if reduced:
-        return box(_half(sq), 1)
-    return box(sq, _WINDOW)
+    energy = box(_half(sq), 1) if reduced else box(sq, _WINDOW)
+    np.maximum(energy, 0.0, out=energy)
+    return energy
 
 
 def _structure_mask(detail: np.ndarray, variance: np.ndarray,

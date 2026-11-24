@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from .colorspace import apply_gamma, srgb_to_linear
+from .metadata import CaptureInfo, attach_to_jpeg, exif_payload, read_capture_info, tiff_extratags
 
 RAW_EXTENSIONS = {
     ".3fr", ".arw", ".braw", ".cap", ".cr2", ".cr3", ".crw", ".dcr", ".dng",
@@ -42,6 +43,8 @@ class LoadedImage:
     path: str = ""
     is_raw: bool = False
     meta: Dict[str, Any] = field(default_factory=dict)
+    capture: CaptureInfo = field(default_factory=CaptureInfo)
+    """Metadonnees de prise de vue, recopiees dans le fichier produit."""
 
 
 def is_raw_file(path: str) -> bool:
@@ -54,32 +57,9 @@ def is_supported(path: str) -> bool:
 
 
 def _read_exif(path: str) -> Dict[str, Any]:
-    """Quelques champs EXIF utiles au rapport (dependance optionnelle)."""
-    try:
-        import exifread  # type: ignore
-    except Exception:
-        return {}
-    try:
-        with open(path, "rb") as fh:
-            tags = exifread.process_file(fh, details=False)
-    except Exception:
-        return {}
-    wanted = {
-        "appareil": ("Image Model", "Image Make"),
-        "objectif": ("EXIF LensModel",),
-        "iso": ("EXIF ISOSpeedRatings",),
-        "vitesse": ("EXIF ExposureTime",),
-        "ouverture": ("EXIF FNumber",),
-        "focale": ("EXIF FocalLength",),
-        "date": ("EXIF DateTimeOriginal",),
-    }
-    out: Dict[str, Any] = {}
-    for key, names in wanted.items():
-        for n in names:
-            if n in tags:
-                out[key] = str(tags[n])
-                break
-    return out
+    """Champs de prise de vue, sous forme lisible (pour le rapport)."""
+    info = read_capture_info(path)
+    return {k: str(v) for k, v in info.fields.items()}
 
 
 def load_image(path: str, half_size: bool = False, demosaic: str = "ahd",
@@ -125,8 +105,10 @@ def load_image(path: str, half_size: bool = False, demosaic: str = "ahd",
             )
             arr = raw.postprocess(**params)
         rgb = arr.astype(np.float32) / 65535.0
-        meta.update(_read_exif(path))
-        return LoadedImage(rgb=np.ascontiguousarray(rgb), path=path, is_raw=True, meta=meta)
+        capture = read_capture_info(path)
+        meta.update({k: str(v) for k, v in capture.fields.items()})
+        return LoadedImage(rgb=np.ascontiguousarray(rgb), path=path, is_raw=True,
+                           meta=meta, capture=capture)
 
     # image deja developpee : on repasse en lineaire pour traiter correctement
     data = cv2.imread(path, cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
@@ -140,26 +122,40 @@ def load_image(path: str, half_size: bool = False, demosaic: str = "ahd",
     maxv = 65535.0 if data.dtype == np.uint16 else 255.0
     enc = data.astype(np.float32) / maxv
     rgb = srgb_to_linear(enc)
-    meta = _read_exif(path)
+    capture = read_capture_info(path)
+    meta = {k: str(v) for k, v in capture.fields.items()}
     if half_size:
         rgb = cv2.resize(rgb, (rgb.shape[1] // 2, rgb.shape[0] // 2),
                          interpolation=cv2.INTER_AREA)
-    return LoadedImage(rgb=np.ascontiguousarray(rgb), path=path, is_raw=False, meta=meta)
+    return LoadedImage(rgb=np.ascontiguousarray(rgb), path=path, is_raw=False,
+                       meta=meta, capture=capture)
 
 
 def auto_exposure(rgb: np.ndarray, percentile: float = 99.7, target: float = 0.94,
-                  max_ev: float = 2.5, min_ev: float = -1.0) -> float:
-    """Gain d'exposition doux, borne, calcule sur les hautes lumieres.
+                  max_ev: float = 3.5, min_ev: float = -1.0,
+                  mid_target: float = 0.22) -> float:
+    """Gain d'exposition, sous deux contraintes.
 
-    Un RAW developpe en lineaire sans eclaircissement est souvent sombre
-    (les fabricants gardent de la marge). On remonte les hautes lumieres sans
-    jamais depasser ``max_ev``, et on ne descend qu'en cas de surexposition.
+    Un RAW developpe en lineaire sans eclaircissement est souvent sombre (les
+    fabricants gardent de la marge). On remonte donc, mais deux choses
+    limitent la remontee :
+
+    * les **hautes lumieres** : le haut de l'histogramme ne doit pas bruler ;
+    * la **tonalite generale** : une scene nocturne ne doit pas se reveiller
+      en plein jour sous pretexte qu'elle est sombre.
+
+    On prend le plus petit des deux gains, et la contrainte de tonalite ne
+    peut qu'abaisser le gain, jamais griser une scene claire (une photo de
+    neige reste blanche).
     """
     sample = rgb[::4, ::4] if rgb.size > 4_000_000 else rgb
     high = float(np.percentile(sample, percentile))
     if high <= 1e-5:
         return 1.0
-    gain = target / high
+    gain_high = target / high
+    median = float(np.median(sample))
+    gain_mid = mid_target / median if median > 1e-6 else gain_high
+    gain = min(gain_high, max(gain_mid, 1.0))
     lo = float(2.0 ** min_ev)
     hi = float(2.0 ** max_ev)
     return float(np.clip(gain, lo, hi))
@@ -175,8 +171,15 @@ def _dither8(x: np.ndarray, rng: Optional[np.random.Generator] = None) -> np.nda
 def save_image(path: str, rgb_linear: np.ndarray, fmt: str = "tiff16",
                quality: int = 95, transfer: str = "srgb",
                metadata: Optional[Dict[str, Any]] = None,
-               dither: bool = True) -> str:
-    """Ecrit le resultat. ``fmt`` : tiff16, tiff8, png16, png, jpeg."""
+               dither: bool = True,
+               capture: Optional[CaptureInfo] = None,
+               software: str = "naturaw") -> str:
+    """Ecrit le resultat. ``fmt`` : tiff16, tiff8, png16, png, jpeg.
+
+    ``capture`` porte les metadonnees du fichier d'origine : elles sont
+    recopiees dans le TIFF (etiquettes standard) et dans le JPEG (bloc EXIF
+    complet, date et position GPS comprises).
+    """
     fmt = (fmt or "tiff16").lower()
     enc = apply_gamma(rgb_linear, transfer)
     directory = os.path.dirname(os.path.abspath(path))
@@ -189,8 +192,9 @@ def save_image(path: str, rgb_linear: np.ndarray, fmt: str = "tiff16",
         # La description TIFF doit etre en ASCII 7 bits : un nom de fichier
         # accentue (ou un rapport en francais) faisait echouer l'ecriture.
         desc = json.dumps(metadata or {}, ensure_ascii=True)
+        extra = tiff_extratags(capture, software) if capture else None
         tifffile.imwrite(path, data, photometric="rgb", compression="adobe_deflate",
-                         description=desc, metadata=None)
+                         description=desc, metadata=None, extratags=extra or ())
         return path
 
     if fmt in ("png16",):
@@ -220,6 +224,8 @@ def save_image(path: str, rgb_linear: np.ndarray, fmt: str = "tiff16",
         if factor is not None and f444 is not None:
             params += [factor, f444]
         _imwrite(path, cv2.cvtColor(data, cv2.COLOR_RGB2BGR), params)
+        if capture:
+            attach_to_jpeg(path, exif_payload(capture, software))
         return path
 
     if fmt in ("tiff8", "tif8"):
@@ -227,8 +233,10 @@ def save_image(path: str, rgb_linear: np.ndarray, fmt: str = "tiff16",
         if dither:
             enc = _dither8(enc)
         data = np.clip(enc * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        extra = tiff_extratags(capture, software) if capture else None
         tifffile.imwrite(path, data, photometric="rgb", compression="adobe_deflate",
-                         description=json.dumps(metadata or {}, ensure_ascii=True))
+                         description=json.dumps(metadata or {}, ensure_ascii=True),
+                         extratags=extra or ())
         return path
 
     raise ValueError(f"format de sortie inconnu : {fmt}")

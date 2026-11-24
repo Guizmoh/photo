@@ -4,3 +4,6 @@ opencv-python-headless>=4.7
 rawpy>=0.18
 tifffile>=2023.1
 imageio>=2.25
+# facultatif : reprise des metadonnees de prise de vue (date, boitier, GPS)
+exifread>=3.0
+piexif>=1.1

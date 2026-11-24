@@ -22,6 +22,7 @@ from naturaw.sharpen import SharpenParams, sharpen_linear_rgb
 from naturaw.tone import ToneParams, tone_rescue
 
 HOSTILE = {
+    "sans aucun bruit": np.clip(synth.architecture(200, 300), 0.01, 1).astype(np.float32),
     "1x1": np.full((1, 1, 3), 0.5, np.float32),
     "8x8": np.full((8, 8, 3), 0.5, np.float32),
     "impair 31x17": np.random.default_rng(0).random((31, 17, 3)).astype(np.float32),

@@ -19,7 +19,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+# metadonnees : lecture de l'EXIF des RAW et ecriture dans les JPEG produits
+metadonnees = ["exifread>=3.0", "piexif>=1.1"]
+dev = ["pytest>=7.0", "exifread>=3.0", "piexif>=1.1"]
 
 [project.scripts]
 naturaw = "naturaw.cli:main"
