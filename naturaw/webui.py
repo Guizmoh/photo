@@ -106,24 +106,37 @@ def _write_preview(path: str, settings: Settings, job_id: str, tag: str) -> Opti
 
     os.makedirs(PREVIEW_DIR, exist_ok=True)
     try:
-        loaded = load_image(path, half_size=True)
+        loaded = load_image(path, half_size=False)
     except Exception:
         return None
-    rgb = loaded.rgb
+    from .pipeline import most_detailed_region, process_array
+    from .rawio import auto_exposure
+
+    full = loaded.rgb
+    # Zone a 100 % : c'est la seule vue sur laquelle on peut juger le bruit et
+    # la nettete, puisqu'une image reduite les cache tous les deux.
+    x0, y0, x1, y1 = most_detailed_region(full, (900, 650))
+    zoom = np.ascontiguousarray(full[y0:y1, x0:x1])
+    rgb = full
     long_side = max(rgb.shape[:2])
     if long_side > 1500:
         sc = 1500.0 / long_side
         rgb = cv2.resize(rgb, (int(rgb.shape[1] * sc), int(rgb.shape[0] * sc)),
                          interpolation=cv2.INTER_AREA)
-    from .pipeline import process_array
-    from .rawio import auto_exposure
     gain = auto_exposure(rgb) if settings.exposure in ("auto", "oui") else 1.0
     before = linear_to_srgb(np.clip(rgb * gain, 0, 1))
     rep: Dict[str, Any] = {}
     after_lin = process_array(rgb.copy(), settings, report=rep)
     after = linear_to_srgb(np.clip(after_lin, 0, 1))
+    zoom_settings = Settings(**{**settings.__dict__, "max_side": 0})
+    zoom_gain = auto_exposure(zoom) if settings.exposure in ("auto", "oui") else 1.0
+    zoom_before = linear_to_srgb(np.clip(zoom * zoom_gain, 0, 1))
+    zoom_after = linear_to_srgb(np.clip(process_array(zoom.copy(), zoom_settings,
+                                                      report={}), 0, 1))
+    rep["apercu_zone"] = f"{x1 - x0}x{y1 - y0} a partir de ({x0}, {y0})"
     out = {}
-    for name, img in (("avant", before), ("apres", after)):
+    for name, img in (("avant", before), ("apres", after),
+                      ("zoom_avant", zoom_before), ("zoom_apres", zoom_after)):
         data = (np.clip(img, 0, 1) * 255.0 + 0.5).astype("uint8")
         ok, buf = cv2.imencode(".jpg", cv2.cvtColor(data, cv2.COLOR_RGB2BGR),
                                [cv2.IMWRITE_JPEG_QUALITY, 88])

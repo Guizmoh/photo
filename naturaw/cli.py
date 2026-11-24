@@ -181,7 +181,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("-j", "--jobs", type=int, default=1,
                    help="nombre de fichiers traites en parallele (defaut : %(default)s)")
     g.add_argument("--apercu", action="store_true",
-                   help="traitement rapide de controle (demi-taille, cote max 1800)")
+                   help="apercu de controle : l'image entiere reduite, plus une "
+                        "zone a 100 %% traitee exactement comme le fichier final "
+                        "(c'est la qu'on juge le bruit et la nettete)")
     g.add_argument("--rapide", action="store_true",
                    help="priorite a la vitesse : une seule passe de debruitage "
                         "et pas d'analyse de bouge (environ deux fois plus rapide)")
@@ -263,7 +265,6 @@ def settings_from_args(a: argparse.Namespace) -> Settings:
         s.denoise.refine = False
         s.deblur.mode = "off"
     if a.apercu:
-        s.half_size = True
         s.max_side = s.max_side or 1800
         s.fmt = "jpeg" if a.fmt == "tiff16" else s.fmt
         s.suffix = a.suffixe if a.suffixe != "_naturaw" else "_apercu"
@@ -303,7 +304,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     def on_done(done: int, count: int, rep) -> None:
         print(f"[{done}/{count}] {summarize(rep)}", flush=True)
 
-    reports = process_many(files, a.sortie, settings, jobs=a.jobs, progress=on_done)
+    reports = process_many(files, a.sortie, settings, jobs=a.jobs, progress=on_done,
+                           preview=a.apercu)
 
     failed = [r for r in reports if "erreur" in r]
     if a.verbeux:

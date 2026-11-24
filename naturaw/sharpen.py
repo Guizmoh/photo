@@ -105,12 +105,21 @@ def sharpen_linear_rgb(rgb: np.ndarray, params: SharpenParams = SharpenParams(),
     slack = params.halo * (hi - lo) + 2.0 * float(noise_sigma)
     np.clip(sharp, lo - slack, hi + slack, out=sharp)
 
-    # masque de structure : accentuer uniquement ou il y a vraiment du detail
-    mean = box(luma, 2)
-    sq = box(luma * luma, 2)
+    # Masque de structure : accentuer uniquement la ou il y a vraiment du
+    # detail. Il est lisse par construction, donc calcule en demi-resolution
+    # sur les grandes images (deux fois moins de temps, difference invisible).
+    reduced = luma.size > 2_000_000
+    ref = cv2.resize(luma, ((luma.shape[1] + 1) // 2, (luma.shape[0] + 1) // 2),
+                     interpolation=cv2.INTER_AREA) if reduced else luma
+    radius = 1 if reduced else 2
+    mean = box(ref, radius)
+    sq = box(ref * ref, radius)
     sd = np.sqrt(np.maximum(sq - mean * mean, 0.0))
     t = np.clip((sd / max(noise_sigma, 1e-5) - params.threshold) / 4.0, 0.0, 1.0)
     weight = (t * t * (3.0 - 2.0 * t)) * amount
+    if reduced:
+        weight = cv2.resize(weight, (luma.shape[1], luma.shape[0]),
+                            interpolation=cv2.INTER_LINEAR)
 
     target = luma + weight * (sharp - luma)
     eps = 2e-3

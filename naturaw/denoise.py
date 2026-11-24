@@ -394,7 +394,8 @@ def denoise_linear_rgb(
         for c in range(3):
             limit = params.safety * np.sqrt(profile.channels[c][0].variance(bright_small))
             limit = _full(limit, out.shape[:2])
-            np.clip(out[..., c], ycc[..., c] - limit, ycc[..., c] + limit, out=out[..., c])
+            np.clip(out[..., c], ycc[..., c] - limit, ycc[..., c] + limit,
+                    out=out[..., c])
 
     rgb_out = ycocg_to_rgb(out)
     np.clip(rgb_out, 0.0, None, out=rgb_out)

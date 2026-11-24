@@ -30,6 +30,7 @@ from .noise import quick_sigma
 from .rescue import RescueParams, apply_rescue
 from .sharpen import SharpenParams, sharpen_linear_rgb
 from .tone import ToneParams, tone_rescue
+from . import __version__
 from .rawio import (IMAGE_EXTENSIONS, RAW_EXTENSIONS, auto_exposure,
                     default_output_name, load_image, save_image)
 
@@ -159,6 +160,36 @@ def process_array(rgb: np.ndarray, settings: Settings,
     return rgb
 
 
+def preview_file(path: str, out_path: str, settings: Settings,
+                 long_side: int = 1800, crop: Sequence[int] = (1200, 800)
+                 ) -> Dict[str, Any]:
+    """Ecrit un apercu double : l'image entiere reduite, et une zone a 100 %.
+
+    Le second fichier porte le suffixe ``-100`` ; c'est celui sur lequel on
+    juge le bruit et la nettete, puisqu'il est traite exactement comme le
+    fichier final.
+    """
+    report: Dict[str, Any] = {"entree": path, "sortie": out_path}
+    start = time.time()
+    loaded = load_image(path, half_size=False, demosaic=settings.demosaic,
+                        camera_wb=settings.camera_wb, color_space=settings.color_space,
+                        highlight_mode=settings.highlight)
+    report["dimensions"] = f"{loaded.rgb.shape[1]}x{loaded.rgb.shape[0]}"
+    report["megapixels"] = round(loaded.rgb.shape[0] * loaded.rgb.shape[1] / 1e6, 1)
+    whole, detail = process_preview(loaded.rgb, settings, long_side=long_side,
+                                    crop=crop, report=report)
+    base, ext = os.path.splitext(out_path)
+    zoom_path = f"{base}-100{ext}"
+    for target, img in ((out_path, whole), (zoom_path, detail)):
+        save_image(target, img, fmt=settings.fmt, quality=settings.quality,
+                   transfer=settings.transfer, dither=settings.dither,
+                   metadata={"logiciel": "naturaw " + __version__, "apercu": True})
+    report["sortie_100"] = zoom_path
+    report["dimensions_sortie"] = f"{whole.shape[1]}x{whole.shape[0]}"
+    report["duree"] = round(time.time() - start, 2)
+    return report
+
+
 def process_file(path: str, out_path: str, settings: Settings,
                  progress: Optional[ProgressFn] = None) -> Dict[str, Any]:
     """Traite un fichier et ecrit le resultat. Renvoie un rapport."""
@@ -188,6 +219,53 @@ def process_file(path: str, out_path: str, settings: Settings,
     if progress:
         progress("termine", 1.0)
     return report
+
+
+def most_detailed_region(rgb: np.ndarray, size: Sequence[int] = (1200, 800)):
+    """Fenetre la plus texturee de l'image, en coordonnees (x0, y0, x1, y1).
+
+    C'est la zone qu'un photographe regarde pour juger le bruit et la
+    nettete : celle qui porte de la matiere.
+    """
+    import cv2
+    h, w = rgb.shape[:2]
+    cw, ch = int(min(size[0], w)), int(min(size[1], h))
+    if cw >= w and ch >= h:
+        return 0, 0, w, h
+    from .colorspace import luminance
+    scale = min(1.0, 600.0 / max(h, w))
+    small = cv2.resize(luminance(rgb), (max(8, int(w * scale)), max(8, int(h * scale))),
+                       interpolation=cv2.INTER_AREA)
+    grad = cv2.magnitude(cv2.Sobel(small, cv2.CV_32F, 1, 0, ksize=3),
+                         cv2.Sobel(small, cv2.CV_32F, 0, 1, ksize=3))
+    k = (max(3, int(cw * scale) | 1), max(3, int(ch * scale) | 1))
+    energy = cv2.boxFilter(grad, -1, k, normalize=True, borderType=cv2.BORDER_REFLECT)
+    yy, xx = np.unravel_index(int(np.argmax(energy)), energy.shape)
+    cx = int(np.clip(xx / scale, cw // 2, w - cw // 2))
+    cy = int(np.clip(yy / scale, ch // 2, h - ch // 2))
+    return cx - cw // 2, cy - ch // 2, cx - cw // 2 + cw, cy - ch // 2 + ch
+
+
+def process_preview(rgb: np.ndarray, settings: Settings,
+                    long_side: int = 1800, crop: Sequence[int] = (1200, 800),
+                    report: Optional[Dict[str, Any]] = None):
+    """Apercu double : l'image entiere reduite, et une fenetre a 100 %.
+
+    Juger un debruitage sur une image reduite n'a pas de sens -- la reduction
+    cache a la fois le bruit et le detail. La fenetre a 100 %, elle, est
+    traitee exactement comme le fichier final : ce que l'on y voit est ce que
+    l'on aura.
+    """
+    report = report if report is not None else {}
+    x0, y0, x1, y1 = most_detailed_region(rgb, crop)
+    detail_settings = Settings(**{**settings.__dict__, "max_side": 0})
+    detail = process_array(np.ascontiguousarray(rgb[y0:y1, x0:x1]), detail_settings,
+                           report=report)
+    whole_settings = Settings(**{**settings.__dict__,
+                                 "max_side": settings.max_side or long_side})
+    whole = process_array(rgb, whole_settings, report={})
+    report["apercu_zone"] = f"{x1 - x0}x{y1 - y0} a partir de ({x0}, {y0})"
+    return whole, detail
 
 
 def collect_inputs(paths: Sequence[str], recursive: bool = False,
@@ -220,23 +298,58 @@ def collect_inputs(paths: Sequence[str], recursive: bool = False,
     return uniq
 
 
+def _pool_context():
+    """Contexte multiprocessing sur lequel on peut compter.
+
+    Le mode ``fork`` de Linux duplique un processus qui a deja des fils
+    d'execution (OpenCV, OpenMP de LibRaw) : les verrous sont copies dans un
+    etat indetermine et l'enfant se bloque pour toujours -- rawpy previent
+    lui-meme du probleme. On demarre donc les processus proprement.
+    """
+    import multiprocessing as mp
+    for name in ("forkserver", "spawn"):
+        if name not in mp.get_all_start_methods():
+            continue
+        try:
+            ctx = mp.get_context(name)
+        except (ValueError, RuntimeError):
+            continue
+        if name == "forkserver":
+            # Par defaut le serveur precharge ``__main__`` : un script
+            # utilisateur sans garde ``if __name__ == "__main__"`` serait
+            # alors reexecute dans chaque processus de travail. On precharge
+            # ce module-ci a la place, qui suffit.
+            try:
+                ctx.set_forkserver_preload(["naturaw.pipeline"])
+            except Exception:
+                pass
+        return ctx
+    return None
+
+
 def _worker(args):
-    path, out_path, settings, threads = args
+    path, out_path, settings, threads, preview = args
     try:
         import cv2
         cv2.setNumThreads(max(1, int(threads)))
     except Exception:
         pass
     try:
+        if preview:
+            return preview_file(path, out_path, settings)
         return process_file(path, out_path, settings)
     except Exception as exc:  # on ne perd pas le lot pour un fichier
         return {"entree": path, "sortie": out_path, "erreur": f"{type(exc).__name__}: {exc}"}
 
 
 def process_many(paths: Sequence[str], out_dir: str, settings: Settings,
-                 jobs: int = 1, progress: Optional[Callable[[int, int, Dict[str, Any]], None]] = None
-                 ) -> List[Dict[str, Any]]:
-    """Traite un lot de fichiers (eventuellement en parallele)."""
+                 jobs: int = 1, progress: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+                 preview: bool = False) -> List[Dict[str, Any]]:
+    """Traite un lot de fichiers (eventuellement en parallele).
+
+    ``preview`` ecrit des apercus (image entiere reduite + zone a 100 %) au
+    lieu du fichier final.
+    """
     jobs = max(1, int(jobs))
     tasks = []
     for p in paths:
@@ -249,7 +362,8 @@ def process_many(paths: Sequence[str], out_dir: str, settings: Settings,
             while os.path.exists(f"{base}-{n}{ext}"):
                 n += 1
             out_path = f"{base}-{n}{ext}"
-        tasks.append((p, out_path, settings, max(1, (os.cpu_count() or 2) // jobs)))
+        tasks.append((p, out_path, settings, max(1, (os.cpu_count() or 2) // jobs),
+                      bool(preview)))
 
     reports: List[Dict[str, Any]] = []
     if jobs == 1:
@@ -261,12 +375,25 @@ def process_many(paths: Sequence[str], out_dir: str, settings: Settings,
         return reports
 
     from concurrent.futures import ProcessPoolExecutor
-    with ProcessPoolExecutor(max_workers=jobs) as pool:
-        for i, rep in enumerate(pool.map(_worker, tasks)):
+    ctx = _pool_context()
+    try:
+        with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as pool:
+            for i, rep in enumerate(pool.map(_worker, tasks)):
+                reports.append(rep)
+                if progress:
+                    progress(i + 1, len(tasks), rep)
+        return reports
+    except Exception as exc:       # pas de processus disponible : on continue seul
+        reports = []
+        for i, task in enumerate(tasks):
+            rep = _worker(task)
+            if i == 0:
+                rep["avertissement"] = (f"traitement parallele indisponible ({exc}), "
+                                        "repli sur un seul processus")
             reports.append(rep)
             if progress:
                 progress(i + 1, len(tasks), rep)
-    return reports
+        return reports
 
 
 def summarize(report: Dict[str, Any]) -> str:
@@ -295,4 +422,7 @@ def summarize(report: Dict[str, Any]) -> str:
         lines.append(f"   redressement      : {report['deskew']}")
     lines.append(f"   sortie            : {report.get('sortie', '?')}"
                  f"  ({report.get('dimensions_sortie', '?')}, {report.get('duree', '?')} s)")
+    if report.get("sortie_100"):
+        lines.append(f"   zone a 100 %      : {report['sortie_100']}"
+                     f"  ({report.get('apercu_zone', '?')})")
     return "\n".join(lines)

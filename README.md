@@ -368,6 +368,11 @@ Mémoire : environ huit fois la taille de l'image en float32 (≈ 2,5 Go pour un
   plutôt que d'appliquer un noyau faux.
 * La **mise au point ratée** n'est pas corrigée (flou isotrope) : c'est un
   autre problème, et le déconvoluer à l'aveugle abîme plus qu'il ne répare.
+* Le **traitement par lot en parallèle** (`-j`) démarre ses processus en mode
+  `forkserver` ou `spawn`. Si vous appelez `process_many` depuis votre propre
+  script Python, entourez l'appel d'un `if __name__ == "__main__":` — c'est la
+  règle habituelle de `multiprocessing`, et sans elle le script se relance
+  dans chaque processus de travail.
 * La **mesure du bruit est calibrée pour des fichiers d'appareil** (12 Mpx et
   plus). Sur une image fortement réduite et très texturée, elle surestime le
   bruit (×1,7 mesuré sur une mire dead leaves de 0,5 Mpx) et le débruitage
@@ -407,6 +412,13 @@ Parcours des dossiers, sélection des photos, réglages avec curseurs, **aperçu
 avant/après** avec comparateur glissant, traitement par lot avec avancement.
 Le serveur n'écoute que sur la machine locale.
 
+L'aperçu donne **deux vues** : l'image entière réduite (cadrage, exposition,
+redressement) et une **zone à 100 %** prise dans la partie la plus texturée,
+traitée exactement comme le fichier final. C'est la seule vue sur laquelle on
+puisse juger le bruit et la netteté — une image réduite cache les deux. En
+ligne de commande, `--apercu` écrit les deux fichiers (`_apercu.jpg` et
+`_apercu-100.jpg`).
+
 ### Ligne de commande
 
 ```bash
@@ -435,6 +447,7 @@ Principales options (`naturaw --help` pour la liste complète) :
 | `--pixels-chauds` | `auto` ou `off` | `auto` |
 | `--bandes` | `off`, `auto`, `h`, `v`, `hv` | `off` |
 | `--rapide` | une passe de débruitage, pas d'analyse de bougé | — |
+| `--apercu` | vue d'ensemble + zone à 100 %, en JPEG | — |
 | `-b, --deflou` | `off`, `auto`, `on`, `force` | `auto` |
 | `--deflou-dose` | dose de déconvolution | `0.8` |
 | `--deflou-longueur`, `--deflou-angle` | bougé connu, imposé | — |

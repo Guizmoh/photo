@@ -17,6 +17,7 @@ le defaut depasse nettement ce que le bruit normal explique.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
@@ -118,21 +119,29 @@ def _detrend(x: np.ndarray, window: int = 31) -> np.ndarray:
     Une bande de lecture change d'une ligne a l'autre ; le contenu de l'image,
     lui, varie doucement. On ne garde donc que la partie "nerveuse".
     """
+    if x.size < 4:
+        return np.zeros_like(x, dtype=np.float32)
     k = max(3, int(window) | 1)
     smooth = cv2.blur(x.reshape(-1, 1), (1, k), borderType=_BORDER).ravel()
     return (x - smooth).astype(np.float32)
 
 
 def _flat_mask(chan: np.ndarray, keep: float = 0.5) -> np.ndarray:
+    """Pixels les plus plats (voir plus bas) ; tout l'est si l'image est minuscule."""
     """Pixels les plus plats de l'image : les seuls ou un decalage se lit.
 
     Sur un contour, l'ecart a la reference lissee vient du contour lui-meme,
     pas du capteur. On ne mesure donc que sur la moitie la plus lisse.
     """
+    if min(chan.shape[:2]) < 8:
+        return np.ones(chan.shape[:2], bool)
     g = cv2.magnitude(cv2.Sobel(chan, cv2.CV_32F, 1, 0, ksize=3),
                       cv2.Sobel(chan, cv2.CV_32F, 0, 1, ksize=3))
     g = cv2.blur(g, (3, 3), borderType=_BORDER)
-    return g <= float(np.quantile(g[::4, ::4], keep))
+    sample = g[::4, ::4]
+    if sample.size == 0:
+        sample = g
+    return g <= float(np.quantile(sample, keep))
 
 
 def _offsets_halves(chan: np.ndarray, axis: int):
@@ -146,18 +155,27 @@ def _offsets_halves(chan: np.ndarray, axis: int):
         hp = chan - cv2.blur(chan, (1, 65), borderType=_BORDER)
     else:           # bandes verticales : lisser horizontalement
         hp = chan - cv2.blur(chan, (65, 1), borderType=_BORDER)
+    # Une ligne peut n'avoir aucun pixel plat : la mediane y est indefinie,
+    # et on la remet a zero (aucune correction pour cette ligne-la). numpy
+    # previent par un avertissement qu'il ne faut pas laisser remonter dans
+    # la console de l'utilisateur.
+    half = (chan.shape[1] if axis == 0 else chan.shape[0]) // 2
+    if half < 8 or min(chan.shape[:2]) < 8:
+        n = chan.shape[0] if axis == 0 else chan.shape[1]
+        zero = np.zeros(n, np.float32)
+        return zero, zero.copy()
     masked = np.where(_flat_mask(chan), hp, np.nan)
-    with np.errstate(invalid="ignore"):
-        if axis == 0:
-            half = masked.shape[1] // 2
-            a = np.nanmedian(masked[:, :half], axis=1)
-            b = np.nanmedian(masked[:, half:], axis=1)
-        else:
-            half = masked.shape[0] // 2
-            a = np.nanmedian(masked[:half, :], axis=0)
-            b = np.nanmedian(masked[half:, :], axis=0)
-    a = np.nan_to_num(a).astype(np.float32)
-    b = np.nan_to_num(b).astype(np.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        with np.errstate(invalid="ignore"):
+            if axis == 0:
+                a = np.nanmedian(masked[:, :half], axis=1)
+                b = np.nanmedian(masked[:, half:], axis=1)
+            else:
+                a = np.nanmedian(masked[:half, :], axis=0)
+                b = np.nanmedian(masked[half:, :], axis=0)
+    a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    b = np.nan_to_num(b, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
     return _detrend(a), _detrend(b)
 
 

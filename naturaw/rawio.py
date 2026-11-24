@@ -186,7 +186,9 @@ def save_image(path: str, rgb_linear: np.ndarray, fmt: str = "tiff16",
     if fmt in ("tiff16", "tif16", "tiff", "tif"):
         import tifffile
         data = np.clip(enc * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
-        desc = json.dumps(metadata or {}, ensure_ascii=False)
+        # La description TIFF doit etre en ASCII 7 bits : un nom de fichier
+        # accentue (ou un rapport en francais) faisait echouer l'ecriture.
+        desc = json.dumps(metadata or {}, ensure_ascii=True)
         tifffile.imwrite(path, data, photometric="rgb", compression="adobe_deflate",
                          description=desc, metadata=None)
         return path
@@ -226,7 +228,7 @@ def save_image(path: str, rgb_linear: np.ndarray, fmt: str = "tiff16",
             enc = _dither8(enc)
         data = np.clip(enc * 255.0 + 0.5, 0, 255).astype(np.uint8)
         tifffile.imwrite(path, data, photometric="rgb", compression="adobe_deflate",
-                         description=json.dumps(metadata or {}, ensure_ascii=False))
+                         description=json.dumps(metadata or {}, ensure_ascii=True))
         return path
 
     raise ValueError(f"format de sortie inconnu : {fmt}")

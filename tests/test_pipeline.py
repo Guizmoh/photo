@@ -94,6 +94,38 @@ def test_exposure_modes():
     assert abs(float(out.mean()) - 0.2) < 1e-4
 
 
+def test_preview_zoom_matches_the_final_result(degraded, tmp_path):
+    """La zone a 100 % de l'apercu doit annoncer fidelement le fichier final.
+
+    Une vue reduite cache a la fois le bruit et le detail : c'est sur la zone
+    a 100 % que l'on juge, elle doit donc etre traitee comme le vrai fichier.
+    """
+    from naturaw.pipeline import most_detailed_region, process_preview
+    from naturaw.colorspace import linear_to_srgb
+    folder, path, _clean = degraded
+    full = load_image(path, color_space="raw").rgb
+    settings = Settings(color_space="raw")
+    # le redressement recadre l'image : on le coupe pour comparer la meme zone
+    settings.deskew.enabled = False
+    final = process_array(full.copy(), settings, report={})
+    _whole, zoom = process_preview(full.copy(), settings, crop=(600, 400), report={})
+    x0, y0, x1, y1 = most_detailed_region(full, (600, 400))
+    ref = linear_to_srgb(final[y0:y1, x0:x1])
+    assert zoom.shape[:2] == ref.shape[:2]
+    assert synth.psnr(ref, linear_to_srgb(zoom)) > 28.0
+
+
+def test_preview_writes_both_files(degraded, tmp_path):
+    from naturaw.pipeline import preview_file
+    folder, path, _clean = degraded
+    out = str(tmp_path / "apercu.jpg")
+    report = preview_file(path, out, Settings(fmt="jpeg", color_space="raw"),
+                          long_side=900, crop=(500, 400))
+    assert os.path.exists(out) and os.path.exists(report["sortie_100"])
+    assert report["sortie_100"].endswith("-100.jpg")
+    assert "apercu_zone" in report
+
+
 def test_collect_inputs(degraded):
     folder, path, _ = degraded
     found = collect_inputs([str(folder)])
@@ -133,7 +165,8 @@ def test_cli_preset_mapping():
     assert settings_from_args(parser.parse_args(["x", "-d", "fort"])).denoise.strength == 1.5
     assert settings_from_args(parser.parse_args(["x", "-d", "0.8"])).denoise.strength == 0.8
     s = settings_from_args(parser.parse_args(["x", "--apercu"]))
-    assert s.half_size and s.max_side == 1800 and s.fmt == "jpeg"
+    # l'apercu decode en pleine resolution : sa zone a 100 % doit etre fidele
+    assert not s.half_size and s.max_side == 1800 and s.fmt == "jpeg"
 
 
 def test_webui_settings_mapping():

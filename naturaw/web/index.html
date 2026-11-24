@@ -217,6 +217,14 @@
       <span class="lab" style="left:8px">avant</span>
       <span class="lab" style="right:8px">après</span>
     </div>
+    <div class="hint" id="zoomNote" hidden>Zone à 100 % — c'est ici qu'on juge
+      le bruit et la netteté : une image réduite cache les deux.</div>
+    <div class="cmp" id="cmpZoom" hidden>
+      <img id="zoomA"><div class="after"><img id="zoomB"></div>
+      <div class="handle" id="handleZoom"></div>
+      <span class="lab" style="left:8px">avant · 100 %</span>
+      <span class="lab" style="right:8px">après · 100 %</span>
+    </div>
     <pre id="log" hidden></pre>
   </section>
 </main>
@@ -310,14 +318,19 @@ async function poll(id){
       $("imgB").src = "/api/image?path="+encodeURIComponent(a.apres);
       $("cmp").hidden = false;
     }
+    if(a && a.zoom_avant && a.zoom_apres){
+      $("zoomA").src = "/api/image?path="+encodeURIComponent(a.zoom_avant);
+      $("zoomB").src = "/api/image?path="+encodeURIComponent(a.zoom_apres);
+      $("cmpZoom").hidden = false; $("zoomNote").hidden = false;
+    }
   }
   if(!j.termine) setTimeout(()=>poll(id), 600);
   else updateCount();
 }
 
-// curseur avant/après
-(function(){
-  const cmp = $("cmp"), handle = $("handle");
+// curseurs avant/après (vue d'ensemble et zone à 100 %)
+function slider(cmpId, handleId){
+  const cmp = $(cmpId), handle = $(handleId);
   let drag = false;
   const move = e => {
     if(!drag) return;
@@ -331,7 +344,9 @@ async function poll(id){
   handle.addEventListener("touchstart", ()=>drag=true);
   addEventListener("mousemove", move); addEventListener("touchmove", move);
   addEventListener("mouseup", ()=>drag=false); addEventListener("touchend", ()=>drag=false);
-})();
+}
+slider("cmp", "handle");
+slider("cmpZoom", "handleZoom");
 
 ["grain","detail","chroma","deflou_dose","angle_max","qualite","nettete","contraste_local"].forEach(id=>{
   const out = {grain:"gv",detail:"dv",chroma:"cv",deflou_dose:"bv",angle_max:"av",
